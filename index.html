@@ -1,0 +1,2410 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>سوران دنتال</title>
+<meta name="theme-color" content="#07293a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="سوران دنتال">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%2307293a'/><text y='.9em' font-size='70' x='50%' text-anchor='middle'>🦷</text></svg>">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%2307293a'/><text y='.9em' font-size='70' x='50%' text-anchor='middle'>🦷</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
+<script>
+// ═══════════════════════════════════════════════════
+//  ONE SIGNAL PUSH NOTIFICATIONS
+// ═══════════════════════════════════════════════════
+var OS_APP_ID = '1ef7c859-1117-47ba-bc1f-2b11119cd886';
+var OS_API_KEY = 'os_v2_app_d334qwirc5d3vpa7fmirdhgyq3sg3vdfguguvkudjj7c23x6lpillauhfin4bsrgurifgne3incwknzv6obsvpfdeqrcus6n4defvea';
+window.OneSignalDeferred = window.OneSignalDeferred || [];
+
+function initOneSignal() {
+  if (typeof window.OneSignal === 'undefined' && typeof window.OneSignalDeferred === 'undefined') {
+    console.log('OneSignal not loaded, skipping push init');
+    return;
+  }
+  try {
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    window.OneSignalDeferred.push(function(OneSignal) {
+      OneSignal.init({
+        appId: OS_APP_ID,
+        notifyButton: { enable: false },
+        allowLocalhostAsSecureOrigin: true,
+      }).then(function() {
+        if (CU) {
+          try { OneSignal.User.addTag('role', CU.role); } catch(e) {}
+          try { OneSignal.User.addTag('userId', CU.id); } catch(e) {}
+          try { OneSignal.User.addTag('clinicId', localStorage.getItem('clinicId')||'soran_main'); } catch(e) {}
+          // Tag patient explicitly so we can push directly to a specific patient
+          if (CU.role === 'patient') {
+            try { OneSignal.User.addTag('patientId', CU.id); } catch(e) {}
+          }
+        }
+        try { if (!OneSignal.Notifications.permission) setTimeout(function(){OneSignal.Notifications.requestPermission();}, 3000); } catch(e) {}
+      }).catch(function(e){ console.warn('OneSignal init error:', e); });
+    });
+  } catch(e) { console.warn('OneSignal error:', e); }
+}
+
+async function pushNotify(title, body, data) {
+  try {
+    var cid = localStorage.getItem('clinicId')||'soran_main';
+    await fetch('https://onesignal.com/api/v1/notifications', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Key '+OS_API_KEY},
+      body:JSON.stringify({
+        app_id:OS_APP_ID,
+        headings:{ar:title,en:title},
+        contents:{ar:body,en:body},
+        filters:[{field:'tag',key:'clinicId',relation:'=',value:cid}],
+        data:data||{},
+        android_accent_color:'0d5c7a'
+      })
+    });
+  } catch(e){console.warn('push err',e);}
+}
+
+async function pushNotifyRole(title, body, role) {
+  try {
+    var cid = localStorage.getItem('clinicId')||'soran_main';
+    await fetch('https://onesignal.com/api/v1/notifications', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Key '+OS_API_KEY},
+      body:JSON.stringify({
+        app_id:OS_APP_ID,
+        headings:{ar:title,en:title},
+        contents:{ar:body,en:body},
+        filters:[{field:'tag',key:'clinicId',relation:'=',value:cid},{operator:'AND'},{field:'tag',key:'role',relation:'=',value:role}],
+        android_accent_color:'0d5c7a'
+      })
+    });
+  } catch(e){console.warn('push err',e);}
+}
+
+// Push to a specific patient (used for appointment confirmations, reminders, plan updates, inquiry replies)
+async function pushNotifyPatient(patientId, title, body, data) {
+  if (!patientId) return;
+  try {
+    var cid = localStorage.getItem('clinicId')||'soran_main';
+    await fetch('https://onesignal.com/api/v1/notifications', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Key '+OS_API_KEY},
+      body:JSON.stringify({
+        app_id:OS_APP_ID,
+        headings:{ar:title,en:title},
+        contents:{ar:body,en:body},
+        filters:[
+          {field:'tag',key:'clinicId',relation:'=',value:cid},
+          {operator:'AND'},
+          {field:'tag',key:'patientId',relation:'=',value:patientId}
+        ],
+        data:data||{},
+        android_accent_color:'16a34a'
+      })
+    });
+  } catch(e){console.warn('push patient err',e);}
+}
+
+// ═══════════════════════════════════════════════════
+//  SCHEDULED PATIENT REMINDERS (OneSignal send_after)
+// ═══════════════════════════════════════════════════
+
+// Build a Date from appointment's date/time, treated as Iraq local time (UTC+3, no DST)
+function getApptDate(appt) {
+  if (!appt || !appt.date) return null;
+  var t = appt.time || '09:00';
+  var d = new Date(appt.date + 'T' + t + ':00+03:00');
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Schedule a single push for a specific patient at a specific time
+async function schedulePushPatient(patientId, title, body, sendAfterISO, data) {
+  if (!patientId || !sendAfterISO) return null;
+  try {
+    var cid = localStorage.getItem('clinicId')||'soran_main';
+    var resp = await fetch('https://onesignal.com/api/v1/notifications', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Key '+OS_API_KEY},
+      body:JSON.stringify({
+        app_id:OS_APP_ID,
+        headings:{ar:title,en:title},
+        contents:{ar:body,en:body},
+        filters:[
+          {field:'tag',key:'clinicId',relation:'=',value:cid},
+          {operator:'AND'},
+          {field:'tag',key:'patientId',relation:'=',value:patientId}
+        ],
+        send_after: sendAfterISO,
+        data: data || {},
+        android_accent_color:'16a34a'
+      })
+    });
+    var j = await resp.json();
+    return (j && j.id) ? j.id : null;
+  } catch(e) { console.warn('schedule push err', e); return null; }
+}
+
+// Schedule both 24h and 2h reminders for an appointment
+async function scheduleApptReminders(apptId) {
+  try {
+    var appts = G('appointments', []);
+    var appt = appts.find(function(x){ return x.id === apptId; });
+    if (!appt || !appt.patientId || !appt.date) return;
+    if (appt.status === 'cancelled' || appt.status === 'completed') return;
+    var apptDate = getApptDate(appt);
+    if (!apptDate) return;
+    var nowMs = Date.now();
+    var apptMs = apptDate.getTime();
+    if (apptMs <= nowMs) return; // already past
+    var pt = pm()[appt.patientId];
+    var doc = sm()[appt.doctorId];
+    if (!pt) return;
+    var docName = doc ? doc.name : '';
+    var timeStr = appt.time || '';
+    var reminders = [];
+
+    // 24h before
+    var time24 = apptMs - 24*3600*1000;
+    if (time24 > nowMs + 60000) {
+      var nid24 = await schedulePushPatient(
+        appt.patientId,
+        '⏰ تذكير: موعدك غداً',
+        'لديك موعد غداً' + (timeStr?' الساعة '+timeStr:'') + (docName?' مع '+docName:'') + ' في عيادة سوران',
+        new Date(time24).toISOString(),
+        { type:'reminder_24h', apptId: appt.id }
+      );
+      if (nid24) reminders.push({ kind:'24h', notifId:nid24, sentAt:new Date(time24).toISOString() });
+    }
+    // 2h before
+    var time2 = apptMs - 2*3600*1000;
+    if (time2 > nowMs + 60000) {
+      var nid2 = await schedulePushPatient(
+        appt.patientId,
+        '⏰ تذكير: موعدك بعد ساعتين',
+        'موعدك اليوم' + (timeStr?' الساعة '+timeStr:'') + (docName?' مع '+docName:'') + ' في عيادة سوران',
+        new Date(time2).toISOString(),
+        { type:'reminder_2h', apptId: appt.id }
+      );
+      if (nid2) reminders.push({ kind:'2h', notifId:nid2, sentAt:new Date(time2).toISOString() });
+    }
+    // Save reminder IDs back on the appointment so we can cancel later
+    if (reminders.length) {
+      var fresh = G('appointments', []);
+      var a2 = fresh.find(function(x){ return x.id === apptId; });
+      if (a2) { a2.reminders = reminders; S('appointments', fresh); }
+    }
+  } catch(e) { console.warn('scheduleApptReminders err', e); }
+}
+
+// Cancel scheduled reminders for an appointment (called on delete or reschedule)
+async function cancelApptReminders(appt) {
+  try {
+    if (!appt || !appt.reminders || !appt.reminders.length) return;
+    for (var i = 0; i < appt.reminders.length; i++) {
+      var r = appt.reminders[i];
+      if (!r.notifId) continue;
+      try {
+        await fetch('https://onesignal.com/api/v1/notifications/' + r.notifId + '?app_id=' + OS_APP_ID, {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Key ' + OS_API_KEY }
+        });
+      } catch(e) { /* swallow */ }
+    }
+  } catch(e) { console.warn('cancelApptReminders err', e); }
+}
+
+// ═══════════════════════════════════════════════════
+//  IN-APP NOTIFICATION SYSTEM
+// ═══════════════════════════════════════════════════
+var _notifs = [];
+
+function addNotif(icon, title, body, action) {
+  var n = { id: uid(), icon: icon, title: title, body: body, action: action, time: new Date().toISOString(), read: false };
+  _notifs.unshift(n);
+  if (_notifs.length > 50) _notifs = _notifs.slice(0, 50);
+  Sl('notifs', _notifs);
+  renderNotifBadge();
+  renderNotifList();
+  // ─── إشعار متصفح أصلي عندما يكون التبويب في الخلفية ───
+  try { showBrowserNotif(icon, title, body, action); } catch(e){}
+  // ─── إبراز جرس الإشعارات بصرياً (وميض لجذب الانتباه) ───
+  try {
+    var bell = document.getElementById('notifBell');
+    if (bell){
+      bell.classList.remove('notif-flash');
+      void bell.offsetWidth; // force reflow to restart animation
+      bell.classList.add('notif-flash');
+    }
+  } catch(e){}
+  // Play sound (use richer playSound if available, else simple beep)
+  try {
+    if (typeof playSound === 'function') {
+      // Pick sound based on icon type
+      if (icon === '🛎️' || icon === '🛎') playSound('arrival');
+      else if (icon === '📋' || icon === '📤') playSound('task');
+      else if (icon === '💬') playSound('message');
+      else playSound('default');
+    } else {
+      var ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var osc = ctx.createOscillator(); var gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880; gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+      osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.4);
+    }
+  } catch(e) {}
+}
+
+// ─── إشعار المتصفح الأصلي (يظهر حتى لو كان التبويب في الخلفية) ───
+function showBrowserNotif(icon, title, body, action){
+  if (typeof Notification === 'undefined') return;
+  if (Notification.permission !== 'granted') return;
+  // أظهر الإشعار فقط إذا كانت الصفحة مخفية، وإلا الصوت + الجرس داخل التطبيق يكفيان
+  if (document.visibilityState === 'visible') return;
+  try {
+    var n = new Notification((icon||'🔔')+' '+(title||'سوران دنتال'), {
+      body: body || '',
+      icon: '/favicon.ico',
+      badge: '/favicon.ico',
+      tag: 'soran-' + Date.now(),
+      requireInteraction: false,
+      silent: false
+    });
+    n.onclick = function(){
+      try { window.focus(); } catch(e){}
+      if (typeof action === 'string' && action.indexOf('navTo') === 0){
+        try { eval(action); } catch(e){}
+      }
+      n.close();
+    };
+    setTimeout(function(){ try { n.close(); } catch(e){} }, 8000);
+  } catch(e){ console.warn('browser notif err', e); }
+}
+
+// ─── طلب إذن الإشعارات عند أول تفاعل من المستخدم (سياسة المتصفح) ───
+function ensureNotifPermission(){
+  if (typeof Notification === 'undefined') return;
+  if (Notification.permission === 'granted' || Notification.permission === 'denied') return;
+  try { Notification.requestPermission(); } catch(e){}
+}
+// نطلب الإذن بعد أول نقرة/لمسة (سياسة Chrome/Safari)
+document.addEventListener('click', function(){ ensureNotifPermission(); }, { once: true });
+document.addEventListener('touchstart', function(){ ensureNotifPermission(); }, { once: true });
+
+function loadNotifs() {
+  _notifs = G('notifs', []);
+  renderNotifBadge();
+}
+
+function renderNotifBadge() {
+  var unread = _notifs.filter(function(n){return !n.read;}).length;
+  var badge = document.getElementById('notifCount');
+  if (!badge) return;
+  if (unread > 0) {
+    badge.style.display = 'flex';
+    badge.textContent = unread > 9 ? '9+' : unread;
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function toggleNotifPanel() {
+  var panel = document.getElementById('notifPanel');
+  if (!panel) return;
+  var isOpen = panel.style.display !== 'none';
+  panel.style.display = isOpen ? 'none' : 'block';
+  if (!isOpen) {
+    // Mark all as read
+    _notifs.forEach(function(n){ n.read = true; });
+    Sl('notifs', _notifs);
+    renderNotifBadge();
+    renderNotifList();
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  QURAN PLAYER (مشغّل القرآن الكريم)
+// ═══════════════════════════════════════════════════
+// Streams from external CDNs — no storage cost on the app.
+// Sources: mp3quran.net live radio streams (well-known reciters)
+var QURAN_RECITERS = [
+  {id:'sudais',  name:'السديس',          url:'https://qurango.net/radio/abdul_rahman_al_sudaes'},
+  {id:'shuraim', name:'الشريم',          url:'https://qurango.net/radio/saud_al_shuraim'},
+  {id:'mishary', name:'مشاري العفاسي',   url:'https://qurango.net/radio/mishary_alafasy'},
+  {id:'maher',   name:'ماهر المعيقلي',   url:'https://qurango.net/radio/maher_almeagli'},
+  {id:'minshawi',name:'المنشاوي',        url:'https://qurango.net/radio/mohammed_siddiq_alminshawi'},
+  {id:'husary',  name:'الحصري',          url:'https://qurango.net/radio/mahmoud_khalil_alhussary'},
+  {id:'ghamdi',  name:'الغامدي',         url:'https://qurango.net/radio/saad_alghamidi'},
+  {id:'ajamy',   name:'العجمي',          url:'https://qurango.net/radio/ahmed_alajamy'},
+  {id:'budair',  name:'البدير',          url:'https://qurango.net/radio/salah_albudair'},
+  {id:'tarateel',name:'ترتيل متنوّع',    url:'https://qurango.net/radio/tarateel'}
+];
+
+var _quranCurrentReciterId = null;
+
+function toggleQuranPanel(){
+  var panel = document.getElementById('quranPanel');
+  if (!panel) return;
+  var isOpen = panel.style.display !== 'none';
+  if (isOpen) {
+    panel.style.display = 'none';
+    return;
+  }
+  // Build reciter buttons (once)
+  renderQuranReciters();
+  panel.style.display = 'block';
+}
+
+function renderQuranReciters(){
+  var el = document.getElementById('quranReciters');
+  if (!el) return;
+  // Restore last reciter from localStorage
+  if (!_quranCurrentReciterId) {
+    try { _quranCurrentReciterId = localStorage.getItem('quranReciter') || ''; } catch(e){}
+  }
+  el.innerHTML = QURAN_RECITERS.map(function(r){
+    var active = _quranCurrentReciterId === r.id;
+    return '<button onclick="quranPlay(\''+r.id+'\')" style="'+
+      'padding:6px 10px;font-size:11px;font-weight:700;border-radius:6px;cursor:pointer;'+
+      'border:1.5px solid '+(active?'#16a34a':'#e2e8f0')+';'+
+      'background:'+(active?'#16a34a':'#fff')+';'+
+      'color:'+(active?'#fff':'#475569')+
+    '">'+r.name+'</button>';
+  }).join('');
+}
+
+function quranPlay(reciterId){
+  var r = QURAN_RECITERS.find(function(x){return x.id===reciterId;});
+  if (!r) return;
+  _quranCurrentReciterId = reciterId;
+  try { localStorage.setItem('quranReciter', reciterId); } catch(e){}
+  var audio = document.getElementById('quranAudio');
+  if (!audio) return;
+  audio.src = r.url;
+  audio.play().catch(function(err){
+    console.warn('Quran play error:', err);
+    alert('⚠️ تعذّر تشغيل البث.\n\nقد يكون السبب:\n• ضعف الاتصال بالإنترنت\n• الموقع المستضيف غير متاح حالياً\n\nجرّب قارئاً آخر.');
+  });
+  var nowEl = document.getElementById('quranNowPlaying');
+  if (nowEl) nowEl.textContent = '▶️ ' + r.name + ' — يبثّ مباشرة';
+  renderQuranReciters(); // refresh active state
+}
+
+function quranSetVolume(v){
+  var audio = document.getElementById('quranAudio');
+  if (audio) audio.volume = Math.max(0, Math.min(1, v));
+}
+
+// ═══════════════════════════════════════════════════
+//  QURAN SCREEN-DIM (battery saver) + WAKE LOCK
+// ═══════════════════════════════════════════════════
+// عند تشغيل القرآن وعدم تفاعل المستخدم لـ ٣٠ ثانية، تظهر طبقة معتمة شفافة لتوفير البطارية.
+// أي لمسة/ضغطة تُلغي العتمة فوراً. Wake Lock يبقي الصوت شغّالاً.
+var _quranDimTimer = null;
+var _quranWakeLock = null;
+var _quranDimSecs  = 30;
+
+function quranEnsureDimOverlay(){
+  if (document.getElementById('quranDimOverlay')) return;
+  var ov = document.createElement('div');
+  ov.id = 'quranDimOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9998;display:none;align-items:center;justify-content:center;flex-direction:column;color:#16a34a;font-family:Tajawal,sans-serif;cursor:pointer;transition:opacity .4s';
+  ov.innerHTML =
+    '<div style="font-size:64px;animation:quran-pulse 2.5s ease-in-out infinite">📖</div>'+
+    '<div style="font-size:18px;font-weight:800;margin-top:14px;letter-spacing:1px">قيد الاستماع للقرآن الكريم</div>'+
+    '<div id="quranDimNow" style="font-size:13px;opacity:.7;margin-top:8px"></div>'+
+    '<div style="font-size:11px;opacity:.5;margin-top:24px;background:rgba(22,163,74,.15);padding:6px 14px;border-radius:20px">المس الشاشة لإيقاظها</div>';
+  document.body.appendChild(ov);
+  // Add pulse animation if not present
+  if (!document.getElementById('quranPulseStyle')){
+    var st = document.createElement('style');
+    st.id = 'quranPulseStyle';
+    st.textContent = '@keyframes quran-pulse{0%,100%{opacity:.7;transform:scale(1)}50%{opacity:1;transform:scale(1.08)}}';
+    document.head.appendChild(st);
+  }
+  // أي تفاعل يلغي العتمة
+  ['click','touchstart','keydown'].forEach(function(ev){
+    ov.addEventListener(ev, function(e){ e.stopPropagation(); quranWake(); });
+  });
+}
+
+function quranShowDim(){
+  quranEnsureDimOverlay();
+  var ov = document.getElementById('quranDimOverlay');
+  if (!ov) return;
+  // اعرض اسم القارئ الحالي
+  var nowEl = document.getElementById('quranDimNow');
+  var srcEl = document.getElementById('quranNowPlaying');
+  if (nowEl && srcEl) nowEl.textContent = (srcEl.textContent||'').replace(/^▶️\s*/,'');
+  ov.style.display = 'flex';
+  ov.style.opacity = '1';
+}
+function quranHideDim(){
+  var ov = document.getElementById('quranDimOverlay');
+  if (ov) ov.style.display = 'none';
+}
+function quranWake(){
+  quranHideDim();
+  quranScheduleDim(); // أعِد المؤقّت
+}
+function quranScheduleDim(){
+  if (_quranDimTimer) clearTimeout(_quranDimTimer);
+  _quranDimTimer = setTimeout(function(){
+    var audio = document.getElementById('quranAudio');
+    if (audio && !audio.paused && document.visibilityState === 'visible'){
+      quranShowDim();
+    }
+  }, _quranDimSecs * 1000);
+}
+async function quranAcquireWakeLock(){
+  try {
+    if ('wakeLock' in navigator && !_quranWakeLock){
+      _quranWakeLock = await navigator.wakeLock.request('screen');
+      _quranWakeLock.addEventListener('release', function(){ _quranWakeLock = null; });
+    }
+  } catch(e){ console.warn('wakeLock fail', e); }
+}
+function quranReleaseWakeLock(){
+  try { if (_quranWakeLock){ _quranWakeLock.release(); _quranWakeLock = null; } } catch(e){}
+}
+
+// ربط أحداث مشغّل القرآن (بعد تحميل الصفحة)
+document.addEventListener('DOMContentLoaded', function(){
+  var audio = document.getElementById('quranAudio');
+  if (!audio) return;
+  audio.addEventListener('play',  function(){ quranAcquireWakeLock(); quranScheduleDim(); });
+  audio.addEventListener('pause', function(){ quranReleaseWakeLock(); quranHideDim(); if (_quranDimTimer){ clearTimeout(_quranDimTimer); _quranDimTimer = null; } });
+  audio.addEventListener('ended', function(){ quranReleaseWakeLock(); quranHideDim(); });
+  // أي تفاعل من المستخدم يعيد تشغيل المؤقت (إذا كان الصوت يعمل)
+  ['click','touchstart','keydown','mousemove'].forEach(function(ev){
+    document.addEventListener(ev, function(){
+      if (audio && !audio.paused){
+        if (document.getElementById('quranDimOverlay') && document.getElementById('quranDimOverlay').style.display !== 'none'){
+          // إذا كانت العتمة ظاهرة، أزِلها
+          quranHideDim();
+        }
+        quranScheduleDim();
+      }
+    }, { passive: true });
+  });
+  // عند العودة للتبويب، أعِد طلب wake lock (المتصفح يلغيه عند تغيير التبويب)
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible' && audio && !audio.paused){
+      quranAcquireWakeLock();
+      quranScheduleDim();
+    } else {
+      quranHideDim();
+    }
+  });
+});
+
+function renderNotifList() {
+  var el = document.getElementById('notifList');
+  if (!el) return;
+  if (!_notifs.length) {
+    el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--gray4);font-size:13px">لا توجد إشعارات</div>';
+    return;
+  }
+  el.innerHTML = _notifs.slice(0, 20).map(function(n) {
+    var ago = timeAgo(n.time);
+    return '<div style="padding:12px 16px;border-bottom:1px solid var(--gray2);display:flex;gap:12px;align-items:flex-start;background:'+(n.read?'#fff':'var(--blue-lt)')+';cursor:'+(n.action?'pointer':'default')+'" onclick="'+(n.action?n.action+';toggleNotifPanel()':'')+'">'
+      + '<div style="font-size:22px;flex-shrink:0">'+n.icon+'</div>'
+      + '<div style="flex:1"><div style="font-weight:700;font-size:13px">'+n.title+'</div>'
+      + '<div style="font-size:12px;color:var(--gray5);margin-top:2px">'+n.body+'</div>'
+      + '<div style="font-size:10px;color:var(--gray4);margin-top:4px">'+ago+'</div></div>'
+      + '</div>';
+  }).join('');
+}
+
+function clearNotifs() {
+  _notifs = []; Sl('notifs', []); renderNotifBadge(); renderNotifList();
+}
+
+function timeAgo(iso) {
+  var diff = Math.floor((new Date() - new Date(iso)) / 1000);
+  if (diff < 60) return 'الآن';
+  if (diff < 3600) return Math.floor(diff/60) + ' دقيقة';
+  if (diff < 86400) return Math.floor(diff/3600) + ' ساعة';
+  return Math.floor(diff/86400) + ' يوم';
+}
+
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" defer></script>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<noscript><div style="text-align:center;padding:40px;font-family:Tajawal,sans-serif;font-size:18px">يرجى تفعيل JavaScript لتشغيل التطبيق</div></noscript>
+
+<!-- ══════════════════════════════════════════════════════
+     LOGIN
+══════════════════════════════════════════════════════ -->
+<div id="loginScreen" style="display:flex">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="logo-icon">🦷</div>
+      <h1>عيادة سوران للرعاية<br>بالفم والأسنان</h1>
+      <p>نظام إدارة العيادة</p>
+    </div>
+    <div class="form-group">
+      <label>اسم المستخدم</label>
+      <input class="form-control" id="loginUser" placeholder="أدخل اسم المستخدم" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" onkeydown="if(event.key==='Enter')document.getElementById('loginPass').focus()">
+    </div>
+    <div class="form-group">
+      <label>كلمة المرور</label>
+      <div style="position:relative">
+        <input type="password" class="form-control" id="loginPass" placeholder="••••••••" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" style="padding-left:42px" onkeydown="if(event.key==='Enter')doLogin()">
+        <button type="button" onclick="togglePassView()" id="togglePassBtn" style="position:absolute;left:6px;top:50%;transform:translateY(-50%);background:none;border:none;font-size:20px;cursor:pointer;padding:6px;color:#94a3b8" title="إظهار/إخفاء كلمة المرور">👁️</button>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+      <input type="checkbox" id="rememberMe" style="width:18px;height:18px;accent-color:var(--blue2);cursor:pointer">
+      <label for="rememberMe" style="font-size:13px;color:var(--gray5);cursor:pointer;margin:0">تذكرني لمدة 7 أيام</label>
+    </div>
+    <button class="btn btn-primary btn-block" style="font-size:15px;padding:13px" onclick="doLogin()">دخول ←</button>
+    <div id="loginErr" style="color:var(--red);font-size:12px;text-align:center;margin-top:8px;display:none"></div>
+    <!-- Manager-only access: hidden until correct manager username is entered -->
+    <div id="loginMgrHint" style="margin-top:14px;text-align:center;font-size:11px;color:#94a3b8;display:none">
+      💡 إذا كنت لا تذكر بيانات الدخول، اطلبها من المدير
+    </div>
+    <button onclick="showScreen('register')" style="width:100%;margin-top:10px;padding:11px;border:1.5px solid var(--border);border-radius:var(--r);background:#fff;font-size:13px;color:var(--blue2);cursor:pointer;font-weight:700">🏥 تسجيل عيادة جديدة</button>
+    <button onclick="showScreen('patientLogin')" style="width:100%;margin-top:8px;padding:11px;border:1.5px solid #16a34a;border-radius:var(--r);background:linear-gradient(135deg,#16a34a,#15803d);font-size:13px;color:#fff;cursor:pointer;font-weight:700">👤 دخول المرضى — بوابة المريض</button>
+    <div style="text-align:center;margin-top:12px">
+      <button onclick="resetToDefaults()" style="background:none;border:none;color:var(--gray4);font-size:11px;cursor:pointer;text-decoration:underline">إعادة تهيئة البيانات الافتراضية</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     PATIENT LOGIN (phone + WhatsApp OTP via clinic confirmation)
+══════════════════════════════════════════════════════ -->
+<div id="patientLoginScreen" style="display:none;min-height:100vh;background:linear-gradient(150deg,#16a34a 0%,#15803d 60%,#14532d 100%);align-items:center;justify-content:center;padding:16px">
+  <div style="background:#fff;border-radius:20px;padding:28px 24px;width:100%;max-width:420px;box-shadow:0 24px 64px rgba(0,0,0,.25)">
+    <!-- Step 1: Phone number entry -->
+    <div id="ptStep1">
+      <div style="text-align:center;margin-bottom:22px">
+        <div style="font-size:48px;margin-bottom:6px">👤</div>
+        <h2 style="font-size:18px;font-weight:800;color:#15803d;margin:0">بوابة المريض</h2>
+        <p style="font-size:12px;color:var(--gray5);margin-top:6px">عيادة سوران للرعاية بالفم والأسنان</p>
+      </div>
+      <div class="form-group">
+        <label>رقم هاتفك المسجّل في العيادة</label>
+        <input type="tel" class="form-control" id="ptPhone" placeholder="07xxxxxxxxx" inputmode="tel" autocomplete="tel">
+      </div>
+      <!-- Mode selector: Simple password (default) or WhatsApp OTP -->
+      <div style="display:flex;gap:6px;margin-bottom:12px;background:#f0fdf4;padding:4px;border-radius:8px">
+        <button type="button" id="ptModeSimpleBtn" onclick="ptSetMode('simple')" style="flex:1;padding:8px;border:none;background:#16a34a;color:#fff;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">🔑 كلمة مرور</button>
+        <button type="button" id="ptModeOtpBtn" onclick="ptSetMode('otp')" style="flex:1;padding:8px;border:none;background:transparent;color:#166534;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">📱 رمز واتساب</button>
+      </div>
+      <!-- Simple password section -->
+      <div id="ptModeSimple">
+        <div class="form-group">
+          <label>كلمة المرور</label>
+          <input type="text" class="form-control" id="ptSimplePass" placeholder="soran + آخر 4 أرقام" autocomplete="current-password">
+          <div style="font-size:11px;color:#16a34a;margin-top:4px">💡 كلمة المرور تتكوّن من <strong>soran</strong> + آخر 4 أرقام من رقم هاتفك. مثال: للرقم 07701234567 → <code style="background:#f0fdf4;padding:1px 4px;border-radius:3px">soran4567</code></div>
+        </div>
+        <button class="btn btn-block" style="background:#16a34a;color:#fff;font-size:15px;padding:13px;font-weight:800" onclick="ptDoSimpleLogin()">🔓 دخول</button>
+      </div>
+      <!-- WhatsApp OTP section (legacy) -->
+      <div id="ptModeOtp" style="display:none">
+        <button class="btn btn-block" style="background:#25d366;color:#fff;font-size:15px;padding:13px;font-weight:800" onclick="ptRequestOTP()">📱 إرسال رمز عبر واتساب</button>
+        <div style="font-size:11px;color:var(--gray5);margin-top:6px;text-align:center">يحتاج تأكيد من العيادة (~ دقيقتين)</div>
+      </div>
+      <div id="ptErr1" style="color:var(--red);font-size:12px;text-align:center;margin-top:10px;display:none"></div>
+      <div style="text-align:center;margin-top:18px">
+        <button onclick="showScreen('login')" style="background:none;border:none;color:var(--gray4);font-size:12px;cursor:pointer;text-decoration:underline">رجوع لشاشة الدخول الرئيسية</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Open WhatsApp + wait for confirmation -->
+    <div id="ptStep2" style="display:none">
+      <div style="text-align:center;margin-bottom:18px">
+        <div style="font-size:42px">📱</div>
+        <h3 style="font-size:16px;font-weight:800;color:#15803d;margin-top:6px">أرسل الرمز عبر واتساب</h3>
+      </div>
+      <div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:12px;padding:14px;margin-bottom:16px;text-align:center">
+        <div style="font-size:11px;color:#15803d;margin-bottom:6px">رمز الدخول المؤقت:</div>
+        <div id="ptOTPDisplay" style="font-size:32px;font-weight:900;color:#166534;letter-spacing:6px;font-family:monospace">000000</div>
+      </div>
+      <div style="font-size:12px;color:var(--gray5);line-height:1.7;margin-bottom:14px">
+        <strong>الخطوات:</strong>
+        <ol style="margin:6px 0 0 0;padding-right:18px">
+          <li>اضغط الزر الأخضر أدناه ليفتح واتساب تلقائياً</li>
+          <li>أرسل الرسالة المُحضّرة لرقم العيادة</li>
+          <li>انتظر رد العيادة بقبول الرمز (~ دقيقتين)</li>
+        </ol>
+      </div>
+      <a id="ptWhatsappBtn" href="#" target="_blank" class="btn btn-block" style="background:#25d366;color:#fff;font-size:15px;padding:14px;font-weight:800;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:8px">💚 فتح واتساب وإرسال الرمز</a>
+      <div style="text-align:center;margin-top:12px;padding:10px;background:#fef3c7;border-radius:8px;font-size:12px;color:#854d0e">
+        <span id="ptWaitingMsg">⏳ في انتظار تأكيد العيادة لرمزك...</span>
+      </div>
+      <div style="text-align:center;margin-top:14px">
+        <button onclick="ptCancelOTP()" style="background:none;border:none;color:var(--gray4);font-size:12px;cursor:pointer;text-decoration:underline">إلغاء والعودة</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     REGISTER
+══════════════════════════════════════════════════════ -->
+<div id="registerScreen" style="display:none">
+  <div style="background:#fff;border-radius:20px;padding:32px 26px;width:100%;max-width:440px;box-shadow:0 24px 64px rgba(0,0,0,.22)">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="font-size:48px">🦷</div>
+      <h2 style="font-size:18px;font-weight:800;color:var(--blue2);margin-top:8px">تسجيل عيادة جديدة</h2>
+      <p style="font-size:12px;color:var(--gray4);margin-top:4px">إنشاء حساب جديد لإدارة عيادتك</p>
+    </div>
+    <div class="form-row" style="margin-bottom:12px">
+      <div class="form-group" style="margin:0"><label>اسم العيادة *</label><input class="form-control" id="regClinicName" placeholder="عيادة سوران..."></div>
+      <div class="form-group" style="margin:0"><label>هاتف العيادة *</label><input class="form-control" id="regClinicPhone" type="tel" placeholder="07xxxxxxxxx"></div>
+    </div>
+    <div class="form-group"><label>عنوان العيادة</label><input class="form-control" id="regClinicAddr" placeholder="المدينة - الحي - الشارع"></div>
+    <hr style="border:none;border-top:1.5px solid var(--gray2);margin:16px 0">
+    <p style="font-size:12px;font-weight:700;color:var(--gray5);margin-bottom:12px">📋 بيانات المدير</p>
+    <div class="form-group"><label>الاسم الكامل *</label><input class="form-control" id="regMgrName" placeholder="د. محمد أحمد"></div>
+    <div class="form-row">
+      <div class="form-group" style="margin:0"><label>اسم المستخدم *</label><input class="form-control" id="regMgrUser" placeholder="manager" dir="ltr"></div>
+      <div class="form-group" style="margin:0"><label>كلمة المرور *</label><input class="form-control" id="regMgrPass" type="password" placeholder="••••••"></div>
+    </div>
+    <div class="form-group mt-12"><label>هاتف المدير</label><input class="form-control" id="regMgrPhone" type="tel" placeholder="07xxxxxxxxx"></div>
+    <div id="regErr" style="color:var(--red);font-size:12px;text-align:center;margin-top:8px;display:none"></div>
+    <button class="btn btn-primary btn-block mt-12" id="regBtn" onclick="doRegister()" style="font-size:15px;padding:13px">✅ تسجيل العيادة</button>
+    <button class="btn btn-ghost btn-block mt-8" onclick="showScreen('login')" style="font-size:13px">← العودة للدخول</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     SUBSCRIPTION EXPIRED
+══════════════════════════════════════════════════════ -->
+<div id="subExpiredScreen" style="display:none">
+  <div style="background:#fff;border-radius:20px;padding:36px 28px;width:100%;max-width:420px;text-align:center;box-shadow:0 24px 64px rgba(0,0,0,.4)">
+    <div style="font-size:64px;margin-bottom:12px">⏰</div>
+    <h2 style="font-size:20px;font-weight:800;color:var(--red);margin-bottom:8px">انتهى الاشتراك</h2>
+    <p style="font-size:13px;color:var(--gray4);margin-bottom:20px" id="subExpMsg">انتهت مدة الاشتراك. تواصل مع الدعم للتجديد.</p>
+    <div style="background:var(--red-lt);border-radius:12px;padding:14px;margin-bottom:20px">
+      <div style="font-size:12px;color:var(--red);font-weight:700" id="subExpDetails"></div>
+    </div>
+    <a href="https://wa.me/9647801234567" target="_blank" class="btn btn-success btn-block" style="margin-bottom:10px;font-size:14px">💬 تواصل للتجديد</a>
+    <button class="btn btn-ghost btn-block" onclick="doLogout()">تسجيل الخروج</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════
+     APP
+══════════════════════════════════════════════════════ -->
+<div id="app" style="display:none">
+  <div class="topbar">
+    <button class="topbar-btn" onclick="toggleSb()">☰</button>
+    <h3 id="topbarTitle">سوران دنتال</h3>
+    <div style="display:flex;gap:4px;align-items:center">
+      <button class="topbar-btn" onclick="toggleQuranPanel()" id="quranBtn" title="استماع للقرآن الكريم" aria-label="استماع للقرآن الكريم" style="font-size:20px">📖</button>
+      <button class="topbar-btn" onclick="toggleNotifPanel()" style="position:relative;font-size:20px" id="notifBell">🔔<span id="notifBadge" style="display:none;position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;border-radius:50%;width:16px;height:16px;font-size:9px;font-weight:800;display:flex;align-items:center;justify-content:center" id="notifCount">0</span></button>
+      <button class="topbar-btn" onclick="navTo('search')" style="font-size:20px">🔍</button>
+    </div>
+  </div>
+
+  <!-- ═══ QURAN PLAYER PANEL ═══ -->
+  <div id="quranPanel" style="display:none;position:fixed;top:60px;left:14px;right:14px;max-width:380px;margin:0 auto;background:#fff;border:1.5px solid #16a34a;border-radius:14px;box-shadow:0 8px 32px rgba(22,163,74,.18);z-index:1500;overflow:hidden">
+    <div style="background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-weight:800;font-size:14px">📖 استماع للقرآن الكريم</div>
+        <div style="font-size:10px;opacity:.85" id="quranNowPlaying">اختر القارئ</div>
+      </div>
+      <button onclick="toggleQuranPanel()" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:28px;height:28px;border-radius:50%;font-size:14px;cursor:pointer">✕</button>
+    </div>
+    <div style="padding:10px 14px">
+      <div style="font-size:11px;color:#64748b;margin-bottom:6px;font-weight:700">🎙️ القارئ:</div>
+      <div id="quranReciters" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px"></div>
+      <audio id="quranAudio" preload="none" style="width:100%;outline:none" controls></audio>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-xs" onclick="quranSetVolume(0.3)">🔉 منخفض</button>
+        <button class="btn btn-ghost btn-xs" onclick="quranSetVolume(0.6)">🔊 متوسط</button>
+        <button class="btn btn-ghost btn-xs" onclick="quranSetVolume(1.0)">🔊 مرتفع</button>
+      </div>
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:8px;margin-top:10px;font-size:10px;color:#166534;line-height:1.6">
+        💡 يستمر التشغيل في الخلفية أثناء استخدامك للنظام<br>
+        📡 البث من خوادم خارجية (لا يستهلك من حجم التطبيق)
+      </div>
+    </div>
+  </div>
+
+  <div class="sb-overlay" id="sbOverlay" onclick="closeSb()"></div>
+
+  <div style="display:flex;min-height:100vh">
+    <!-- SIDEBAR -->
+    <div class="sidebar" id="sidebar">
+      <div class="sb-brand"><h2>🦷 سوران للرعاية<br>بالفم والأسنان</h2><p>نظام إدارة العيادة</p></div>
+      <div class="sb-user"><div class="u-name" id="sbName">-</div><div class="u-role" id="sbRole">-</div></div>
+      <div class="sb-nav" id="sbNav"></div>
+      <div class="sb-footer"><button class="sb-logout" onclick="doLogout()">🚪 تسجيل الخروج</button></div>
+    </div>
+
+    <!-- MAIN -->
+    <div class="main-content">
+
+      <!-- DASHBOARD -->
+      <div class="page" id="pg-dashboard">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">لوحة التحكم</div><div class="page-hdr-sub" id="dashDate"></div></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="openAdsSettings()" data-perm="*" title="إدارة إعلانات بوابة المريض">📢 الإعلانات</button>
+            <button class="btn btn-primary btn-sm" onclick="openModal('mo-addAppt')">📅 + موعد</button>
+          </div>
+        </div>
+        <div class="stats-row" id="dashStats"></div>
+        <div class="grid-2">
+          <div class="card"><div class="card-header"><span class="card-title">📅 مواعيد اليوم</span><button class="btn btn-ghost btn-xs" onclick="navTo('appointments')">الكل</button></div><div class="card-body" id="dashAppts"></div></div>
+          <div class="card"><div class="card-header"><span class="card-title">📋 خطط نشطة</span></div><div class="card-body" id="dashPlans"></div></div>
+        </div>
+      </div>
+
+      <!-- SEARCH -->
+      <div class="page" id="pg-search">
+        <div class="page-hdr"><div class="page-hdr-title">🔍 بحث سريع</div></div>
+        <div class="search-wrap" style="margin-bottom:16px"><input class="form-control" id="globalQ" placeholder="ابحث بالاسم أو الهاتف..." oninput="renderSearch()"></div>
+        <div id="searchResults"></div>
+      </div>
+
+      <!-- PATIENTS -->
+      <div class="page" id="pg-patients">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">👥 المرضى</div></div>
+          <div class="flex gap-8" style="flex-wrap:wrap">
+            <div class="search-wrap"><input class="form-control" id="ptSearch" placeholder="بحث..." oninput="renderPatients()" style="width:180px"></div>
+            <button class="btn btn-primary btn-sm" onclick="openModal('mo-addPatient')">+ مريض</button>
+          </div>
+        </div>
+        <div class="card"><div class="tbl-wrap"><table>
+          <thead><tr><th>#</th><th>المريض</th><th>الهاتف</th><th>آخر زيارة</th><th>الخطط</th><th></th></tr></thead>
+          <tbody id="ptBody"></tbody>
+        </table></div></div>
+      </div>
+
+      <!-- PROFILE -->
+      <div class="page" id="pg-profile">
+        <div class="page-hdr">
+          <button class="btn btn-ghost btn-sm" onclick="navTo('patients')">← رجوع</button>
+          <button class="btn btn-primary btn-sm" onclick="openAddApptForPatient()">📅 + موعد</button>
+          <button class="btn btn-sm" id="btnInitExam" onclick="openInitExam()" style="background:#0d5c7a;color:#fff;border:none">🦷 الفحص الأولي</button>
+        </div>
+        <div class="profile-banner">
+          <div class="profile-avatar">👤</div>
+          <div style="flex:1"><div style="font-size:18px;font-weight:800" id="profName">-</div><div style="font-size:12px;opacity:.8;margin-top:3px" id="profMeta">-</div></div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <button onclick="callPatient()" style="background:#16a34a;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer">📞 اتصال</button>
+            <button onclick="waPatient()" style="background:#25D366;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;cursor:pointer">💬 واتساب</button>
+          </div>
+        </div>
+        <div class="tab-bar">
+          <button class="tab-btn active" onclick="switchTab('info',this)">المعلومات</button>
+          <button class="tab-btn" onclick="switchTab('plans',this)">خطط العلاج</button>
+          <button class="tab-btn" onclick="switchTab('appts',this)">المواعيد</button>
+          <button class="tab-btn" onclick="switchTab('pays',this)">المدفوعات</button>
+          <button class="tab-btn" onclick="switchTab('consents',this)">📄 الموافقات</button>
+        </div>
+        <div class="tab-panel active" id="tp-info"><div class="card card-body" id="profInfo"></div></div>
+        <div class="tab-panel" id="tp-plans">
+          <div class="flex-between" style="margin-bottom:12px"><span class="fw-700" style="font-size:15px">خطط العلاج</span><button class="btn btn-primary btn-sm" onclick="openModal('mo-addPlan')">+ خطة</button></div>
+          <div id="plansList"></div>
+        </div>
+        <div class="tab-panel" id="tp-appts"><div id="profAppts"></div></div>
+        <div class="tab-panel" id="tp-pays"><div id="profPays"></div></div>
+        <div class="tab-panel" id="tp-consents">
+          <div class="flex-between" style="margin-bottom:12px">
+            <span class="fw-700" style="font-size:15px">📄 موافقات المريض</span>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-ghost btn-sm" onclick="openConsentTplEditor()" id="btnEditConsentTpls" style="display:none">⚙️ القوالب</button>
+              <button class="btn btn-primary btn-sm" onclick="openNewConsent()">+ موافقة جديدة</button>
+            </div>
+          </div>
+          <div id="consentsList"></div>
+        </div>
+      </div>
+
+      <!-- APPOINTMENTS -->
+      <div class="page" id="pg-appointments">
+        <div class="page-hdr"><div class="page-hdr-title">📅 المواعيد</div><button class="btn btn-primary btn-sm" onclick="openModal('mo-addAppt')">+ موعد</button></div>
+        <!-- Range tabs -->
+        <div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:8px 10px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap" id="apptRangeTabs">
+            <button class="btn btn-sm btn-primary" data-range="today"  onclick="apptSetRange('today')">📍 اليوم</button>
+            <button class="btn btn-sm btn-ghost"   data-range="week"   onclick="apptSetRange('week')">📆 الأسبوع</button>
+            <button class="btn btn-sm btn-ghost"   data-range="month"  onclick="apptSetRange('month')">🗓️ الشهر</button>
+            <button class="btn btn-sm btn-ghost"   data-range="upcoming" onclick="apptSetRange('upcoming')">⏭️ القادمة</button>
+            <button class="btn btn-sm btn-ghost"   data-range="all"    onclick="apptSetRange('all')">📋 الكل</button>
+          </div>
+        </div></div>
+        <!-- Quick stats per range -->
+        <div class="stats" id="apptStats" style="margin-bottom:10px"></div>
+        <div class="card" style="margin-bottom:12px"><div class="card-body" style="padding:10px 14px">
+          <div class="flex gap-8" style="flex-wrap:wrap">
+            <input type="date" class="form-control" id="apptFDate" style="width:155px" onchange="renderAppts()">
+            <select class="form-control" id="apptFDoc" style="width:160px" onchange="renderAppts()"><option value="">كل الأطباء</option></select>
+            <select class="form-control" id="apptFSt" style="width:130px" onchange="renderAppts()">
+              <option value="">كل الحالات</option><option value="scheduled">مجدول</option><option value="arrived">وصل</option><option value="completed">مكتمل</option><option value="cancelled">ملغي</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('apptFDate').value='';document.getElementById('apptFDoc').value='';document.getElementById('apptFSt').value='';renderAppts();">✕ مسح الفلاتر</button>
+          </div>
+        </div></div>
+        <div class="card"><div class="tbl-wrap"><table>
+          <thead><tr><th>المريض</th><th>الطبيب</th><th>التاريخ / الوقت</th><th>السبب</th><th>الحالة</th><th>حُجز بواسطة</th><th></th></tr></thead>
+          <tbody id="apptBody"></tbody>
+        </table></div></div>
+      </div>
+
+      <!-- STAFF -->
+      <div class="page" id="pg-staff">
+        <div class="page-hdr"><div class="page-hdr-title">👨‍⚕️ الكادر الطبي</div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" id="staffCredsBtn" onclick="toggleStaffCreds()" style="display:none">🔑 بيانات الدخول</button>
+            <button class="btn btn-primary btn-sm" onclick="openAddStaff()">+ إضافة كادر</button>
+          </div>
+        </div>
+        <div id="staffCredsPanel" style="display:none;margin-bottom:14px"></div>
+        <div class="card"><div class="tbl-wrap"><table>
+          <thead><tr><th>الاسم</th><th>الدور</th><th>المستخدم</th><th>الهاتف</th><th>العمولة</th><th></th></tr></thead>
+          <tbody id="staffBody"></tbody>
+        </table></div></div>
+        <div id="clinicSettings" style="display:none;margin-top:16px">
+          <div class="card"><div class="card-header"><span class="card-title">🏥 معلومات العيادة</span></div>
+            <div class="card-body">
+              <div class="form-row">
+                <div class="form-group"><label>اسم العيادة *</label><input class="form-control" id="clName"></div>
+                <div class="form-group"><label>هاتف العيادة</label><input class="form-control" id="clPhone" type="tel"></div>
+              </div>
+              <div class="form-group"><label>العنوان</label><input class="form-control" id="clAddress"></div>
+              <div class="form-actions" style="justify-content:flex-start;margin-top:0"><button class="btn btn-primary" onclick="saveClinic()">💾 حفظ</button></div>
+            </div>
+          </div>
+          <div class="card" style="margin-top:14px"><div class="card-header"><span class="card-title">📋 معلومات الاشتراك</span></div><div class="card-body" id="subInfoBody">-</div></div>
+          <div class="card" style="margin-top:14px"><div class="card-header"><span class="card-title">📱 قوالب الرسائل</span></div>
+            <div class="card-body">
+              <div style="font-size:12px;color:var(--gray5);margin-bottom:10px">عدّل قوالب الرسائل الجاهزة لتناسب أسلوب عيادتك. الكادر يستخدم هذه القوالب عند إرسال الرسائل.</div>
+              <button class="btn btn-ghost btn-sm" onclick="openOrthoDevTplEditor()" style="width:100%;justify-content:flex-start;text-align:right">🦷 رسائل أجهزة التقويم (٨ قوالب)</button>
+            </div>
+          </div>
+          <div class="card" style="margin-top:14px"><div class="card-header"><span class="card-title">⚙️ أدوات إدارية</span></div>
+            <div class="card-body">
+              <div style="font-size:12px;color:var(--gray5);margin-bottom:10px">تطبيق كادر العيادة الرسمي على النظام. يحافظ على جميع بيانات المرضى والخطط الحالية.</div>
+              <button class="btn btn-ghost btn-sm" onclick="applyOfficialStaff()" style="width:100%;justify-content:flex-start;text-align:right;color:var(--blue2)">📥 تطبيق كادر سوران الرسمي</button>
+            </div>
+          </div>
+          <div class="card" style="margin-top:14px"><div class="card-header"><span class="card-title">☁️ المزامنة مع السحابة</span></div>
+            <div class="card-body">
+              <div style="font-size:12px;color:var(--gray5);margin-bottom:10px">إذا كانت البيانات لا تظهر بعد فتح التطبيق على جهاز/متصفح جديد، اضغط الزر أدناه لجلبها مباشرة من فايربيز.</div>
+              <div id="syncStatus" style="background:#f0f9ff;border:1.5px solid #bae6fd;border-radius:8px;padding:10px;margin-bottom:10px;font-size:12px;color:#075985">⏳ جاهز للمزامنة</div>
+              <button class="btn btn-primary btn-sm btn-block" onclick="manualResync()">🔄 إعادة المزامنة الآن</button>
+              <div style="font-size:10px;color:var(--gray4);margin-top:8px;line-height:1.6">💡 يفيد هذا الزر عند فتح التطبيق على جهاز جديد، أو إذا شعرت أن البيانات قديمة.</div>
+            </div>
+          </div>
+          <div class="card" style="margin-top:14px"><div class="card-header"><span class="card-title">💾 النسخ الاحتياطي</span></div>
+            <div class="card-body">
+              <div style="font-size:12px;color:var(--gray5);margin-bottom:10px">احتفظ بنسخة احتياطية كاملة على جهازك أو استعد بيانات من نسخة سابقة.</div>
+              <div id="backupStats" style="background:#f8fbfd;border-radius:8px;padding:10px;margin-bottom:10px;font-size:11px;color:var(--gray5)"></div>
+              <button class="btn btn-success btn-sm btn-block" onclick="exportBackup()" style="margin-bottom:8px">📥 تصدير نسخة احتياطية كاملة (.json)</button>
+              <input type="file" id="restoreFileInput" accept=".json,application/json" onchange="onRestoreFile(event)" style="display:none">
+              <button class="btn btn-ghost btn-sm btn-block" onclick="document.getElementById('restoreFileInput').click()" style="color:var(--orange);border:1.5px solid #fed7aa">📤 استعادة من نسخة احتياطية</button>
+              <div style="font-size:10px;color:var(--gray4);margin-top:10px;line-height:1.6">💡 <strong>نصيحة:</strong> صدّر نسخة احتياطية مرة واحدة كل أسبوع وخزّنها على Google Drive أو وسيلة آمنة. الاستعادة تستبدل البيانات الحالية بالكامل.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- COMMISSIONS -->
+      <div class="page" id="pg-commissions">
+        <div class="page-hdr"><div class="page-hdr-title">💰 العمولات</div></div>
+        <!-- Tabs: Doctors vs Marketer -->
+        <div class="card" style="margin-bottom:10px"><div class="card-body" style="padding:8px 10px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap" id="commTabsBox">
+            <button class="btn btn-sm btn-primary" data-tab="docs"      onclick="commSetTab('docs')">👨‍⚕️ عمولات الأطباء</button>
+            <button class="btn btn-sm btn-ghost"   data-tab="marketers" onclick="commSetTab('marketers')">📢 حوافز المسوّقين</button>
+          </div>
+        </div></div>
+
+        <!-- Doctors view -->
+        <div id="commDocsBox">
+          <div class="card" style="margin-bottom:12px"><div class="card-body" style="padding:10px 14px">
+            <div class="flex gap-8" style="flex-wrap:wrap">
+              <select class="form-control" id="commFStaff" style="width:170px" onchange="renderComm()"><option value="">كل الكادر</option></select>
+              <select class="form-control" id="commFMonth" style="width:150px" onchange="renderComm()"><option value="">كل الأشهر</option></select>
+            </div>
+          </div></div>
+          <div class="stats-row" id="commStats"></div>
+          <div class="card"><div class="tbl-wrap"><table>
+            <thead><tr><th>الكادر</th><th>المريض</th><th>التاريخ</th><th>الخدمة</th><th>المبلغ</th><th>النسبة</th><th>العمولة</th><th></th></tr></thead>
+            <tbody id="commBody"></tbody>
+          </table></div></div>
+        </div>
+
+        <!-- Marketers view -->
+        <div id="commMktBox" style="display:none">
+          <div class="card" style="margin-bottom:12px"><div class="card-body" style="padding:10px 14px">
+            <div class="flex gap-8" style="flex-wrap:wrap;align-items:center">
+              <select class="form-control" id="mkcFMarketer" style="width:200px" onchange="renderMktComm()"><option value="">كل المسوّقين</option></select>
+              <select class="form-control" id="mkcFRange" style="width:150px" onchange="renderMktComm()">
+                <option value="all">كل الفترات</option>
+                <option value="today">اليوم</option>
+                <option value="week">هذا الأسبوع</option>
+                <option value="month" selected>هذا الشهر</option>
+              </select>
+              <select class="form-control" id="mkcFType" style="width:150px" onchange="renderMktComm()">
+                <option value="">كل الأنواع</option>
+                <option value="implant">زراعة (25,000)</option>
+                <option value="ortho">تقويم (25,000)</option>
+                <option value="smile">ابتسامة (25,000)</option>
+                <option value="filling">حشوات (5,000)</option>
+                <option value="extraction">قلع (3,000)</option>
+              </select>
+              <div style="font-size:11px;color:var(--gray5);background:#fff7ed;padding:6px 10px;border-radius:8px;border:1px dashed #fb923c">
+                ⚙️ التعرفة: زراعة/تقويم/ابتسامة 25,000 — حشوات 5,000 — قلع 3,000 د.ع
+              </div>
+            </div>
+          </div></div>
+          <div class="stats-row" id="mkcStats"></div>
+          <div id="mkcByMarketer" style="margin-bottom:12px"></div>
+          <div class="card"><div class="tbl-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>المسوّق</th><th>المريض</th><th>نوع الحالة</th><th>الحافز</th><th>وصف الخطة</th><th></th></tr></thead>
+            <tbody id="mkcBody"></tbody>
+          </table></div></div>
+        </div>
+      </div>
+
+      <!-- FINANCE -->
+      <div class="page" id="pg-finance">
+        <div class="page-hdr"><div class="page-hdr-title">📊 التقارير المالية</div></div>
+        <div class="stats-row" id="finStats"></div>
+        <div class="grid-2">
+          <div class="card"><div class="card-header"><span class="card-title">💳 آخر المدفوعات</span></div><div class="card-body" id="finRecent"></div></div>
+          <div class="card"><div class="card-header"><span class="card-title">📈 الإيرادات بالطبيب</span></div><div class="card-body" id="finByDoc"></div></div>
+        </div>
+      </div>
+
+      <!-- DEBTORS -->
+      <div class="page" id="pg-debtors">
+        <div class="page-hdr"><div class="page-hdr-title">⚠️ ديون المرضى</div></div>
+        <div class="stats-row" id="debtStats"></div>
+        <div class="card"><div class="tbl-wrap"><table>
+          <thead><tr><th>المريض</th><th>الخطة</th><th>التكلفة</th><th>المدفوع</th><th>الدين</th><th>التاريخ</th><th></th></tr></thead>
+          <tbody id="debtBody"></tbody>
+        </table></div></div>
+      </div>
+
+      <!-- ═══ RECALL (periodic patient reminders) ═══ -->
+      <div class="page" id="pg-recall">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">🔔 نظام Recall</div><div class="page-hdr-sub">تذكير المرضى بعد فترة محددة من آخر زيارة</div></div>
+        </div>
+        <div class="stats-row" id="recallStats"></div>
+        <div class="card" style="margin-bottom:12px"><div class="card-body">
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+            <div class="form-group" style="margin:0;flex:1;min-width:140px">
+              <label style="font-size:11px">فترة الـ Recall (بالأشهر)</label>
+              <select class="form-control" id="recallMonths" onchange="renderRecall()">
+                <option value="3">3 أشهر</option>
+                <option value="6" selected>6 أشهر (افتراضي)</option>
+                <option value="9">9 أشهر</option>
+                <option value="12">12 شهر (سنة)</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin:0;flex:1;min-width:140px">
+              <label style="font-size:11px">الحالة</label>
+              <select class="form-control" id="recallFilter" onchange="renderRecall()">
+                <option value="due" selected>المستحقّون فقط</option>
+                <option value="upcoming">قارب موعدهم (خلال شهر)</option>
+                <option value="never">لم يأتوا أبداً</option>
+                <option value="all">الكل</option>
+              </select>
+            </div>
+            <button class="btn btn-success" onclick="recallSendBulkWA()" style="white-space:nowrap">📤 إرسال جماعي عبر واتساب</button>
+          </div>
+        </div></div>
+        <div class="card"><div class="tbl-wrap"><table>
+          <thead><tr><th>المريض</th><th>آخر زيارة</th><th>منذ</th><th>الطبيب</th><th>الإجراءات</th></tr></thead>
+          <tbody id="recallBody"></tbody>
+        </table></div></div>
+      </div>
+
+      <!-- ═══ CLINIC DEBTS (مستحقّات على العيادة لجهات خارجية) ═══ -->
+      <div class="page" id="pg-clinicDebts">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">💼 ديون العيادة</div><div class="page-hdr-sub">المبالغ المستحقّة على العيادة لجهات خارجية</div></div>
+          <button class="btn btn-primary btn-sm" onclick="openModal('mo-addClinicDebt')">+ إضافة دين</button>
+        </div>
+        <div class="stats-row" id="cdStats"></div>
+        <div class="card" style="margin-bottom:12px"><div class="card-body">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
+            <div class="form-group" style="margin:0;flex:1;min-width:120px">
+              <label style="font-size:11px">الحالة</label>
+              <select class="form-control" id="cdFilter" onchange="renderClinicDebts()">
+                <option value="open" selected>المتبقّية فقط</option>
+                <option value="overdue">المتأخّرة</option>
+                <option value="paid">المسدّدة</option>
+                <option value="all">الكل</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin:0;flex:1;min-width:120px">
+              <label style="font-size:11px">الفئة</label>
+              <select class="form-control" id="cdCatFilter" onchange="renderClinicDebts()">
+                <option value="">كل الفئات</option>
+                <option>مختبر</option>
+                <option>مواد</option>
+                <option>إيجار</option>
+                <option>كهرباء/ماء</option>
+                <option>صيانة</option>
+                <option>قرض</option>
+                <option>راتب</option>
+                <option>أخرى</option>
+              </select>
+            </div>
+          </div>
+        </div></div>
+        <div id="cdList"></div>
+      </div>
+
+      <!-- ═══ VENDORS (مختبرات، مكاتب أسنان، موردين) ═══ -->
+      <div class="page" id="pg-vendors">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">🏢 مختبرات ومكاتب الأسنان</div><div class="page-hdr-sub">جهات الاتصال والتعامل اليومي</div></div>
+          <button class="btn btn-primary btn-sm" onclick="openAddVendor()">+ إضافة جهة</button>
+        </div>
+        <div class="card" style="margin-bottom:12px"><div class="card-body">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
+            <div class="form-group" style="margin:0;flex:2;min-width:140px">
+              <label style="font-size:11px">🔍 بحث</label>
+              <input class="form-control" id="venQ" placeholder="اسم الجهة، التخصّص، الهاتف..." oninput="renderVendors()">
+            </div>
+            <div class="form-group" style="margin:0;flex:1;min-width:120px">
+              <label style="font-size:11px">النوع</label>
+              <select class="form-control" id="venTypeFilter" onchange="renderVendors()">
+                <option value="">كل الأنواع</option>
+                <option value="lab">🔬 مختبر</option>
+                <option value="dental_office">🦷 مكتب أسنان</option>
+                <option value="supplier">📦 مورد مواد</option>
+                <option value="equipment">🛠️ صيانة/أجهزة</option>
+                <option value="radiology">📷 أشعة</option>
+                <option value="other">📌 أخرى</option>
+              </select>
+            </div>
+          </div>
+        </div></div>
+        <div id="venList"></div>
+      </div>
+
+      <!-- ═══ DOCTOR SETTLEMENTS (تصفية حسابات الأطباء) ═══ -->
+      <div class="page" id="pg-settlements">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">💵 تصفية الأطباء</div><div class="page-hdr-sub">استلام/تسليم المبالغ بين الأطباء</div></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-success btn-sm" onclick="openEndOfDayPanel()">🌙 تصفية نهاية الدوام</button>
+            <button class="btn btn-primary btn-sm" onclick="openSettlementModal()">+ تصفية مفصّلة</button>
+          </div>
+        </div>
+        <div id="endOfDayPanel" style="display:none;margin-bottom:14px"></div>
+        <div class="stats-row" id="settStats"></div>
+        <div class="card" style="margin-bottom:12px"><div class="card-body">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
+            <div class="form-group" style="margin:0;flex:1;min-width:120px">
+              <label style="font-size:11px">الطبيب</label>
+              <select class="form-control" id="settFDoc" onchange="renderSettlements()"><option value="">كل الأطباء</option></select>
+            </div>
+            <div class="form-group" style="margin:0;flex:1;min-width:120px">
+              <label style="font-size:11px">من تاريخ</label>
+              <input type="date" class="form-control" id="settFFrom" onchange="renderSettlements()">
+            </div>
+            <div class="form-group" style="margin:0;flex:1;min-width:120px">
+              <label style="font-size:11px">إلى تاريخ</label>
+              <input type="date" class="form-control" id="settFTo" onchange="renderSettlements()">
+            </div>
+          </div>
+        </div></div>
+        <div class="card"><div class="tbl-wrap"><table>
+          <thead><tr><th>التاريخ</th><th>الطبيب</th><th>النوع</th><th>المبلغ</th><th>الفترة</th><th>المنفّذ</th><th></th></tr></thead>
+          <tbody id="settBody"></tbody>
+        </table></div></div>
+      </div>
+
+      <!-- INVENTORY -->
+      <div class="page" id="pg-inventory">
+        <div class="page-hdr"><div class="page-hdr-title">🛒 المشتريات</div>
+          <div class="flex gap-8">
+            <select class="form-control" id="invFCat" style="width:130px" onchange="renderInventory()"><option value="">كل الفئات</option><option>مستهلكات</option><option>أدوات</option><option>مواد طبية</option><option>مواد مختبر</option><option>أخرى</option></select>
+            <button class="btn btn-primary btn-sm" onclick="openModal('mo-addItem')">+ إضافة طلب</button>
+            <button class="btn btn-ghost btn-sm" onclick="printInventory()">🖨️ طباعة</button>
+          </div>
+        </div>
+        <div class="stats-row" id="invStats"></div>
+        <div id="invPendingSection"></div>
+        <div id="invBoughtSection"></div>
+      </div>
+
+      <!-- MARKETING -->
+      <div class="page" id="pg-marketing">
+        <div class="page-hdr"><div class="page-hdr-title">📢 التسويق</div></div>
+        <div class="stats-row" id="mktStats"></div>
+        <div class="card" style="margin-bottom:12px"><div class="card-body">
+          <div class="flex gap-8" style="margin-bottom:12px;flex-wrap:wrap">
+            <button id="mktModeBtn-type" class="btn btn-primary btn-sm" onclick="mktSetMode('type')">📋 نوع العلاج</button>
+            <button id="mktModeBtn-manual" class="btn btn-ghost btn-sm" onclick="mktSetMode('manual')">🔍 يدوي</button>
+            <button id="mktModeBtn-all" class="btn btn-ghost btn-sm" onclick="mktSetMode('all')">👥 الكل</button>
+          </div>
+          <div id="mktModeType"><div id="mktSegmentTabs" style="display:flex;flex-wrap:wrap;gap:6px"></div></div>
+          <div id="mktModeManual" style="display:none"><div class="search-wrap"><input class="form-control" id="mktSearch" placeholder="بحث بالاسم أو الهاتف..." oninput="renderMarketing()"></div></div>
+          <div id="mktModeAll" style="display:none"><div class="alert alert-info">👥 سيتم تحديد جميع المرضى الذين لديهم رقم هاتف</div></div>
+        </div></div>
+        <div class="card" style="margin-bottom:12px"><div class="card-body">
+          <div style="font-size:12px;font-weight:700;color:var(--gray5);margin-bottom:8px">✍️ الرسالة</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+            <button class="btn btn-ghost btn-xs" onclick="mktTpl('implant')">🦷 زراعة</button>
+            <button class="btn btn-ghost btn-xs" onclick="mktTpl('ortho')">🔧 تقويم</button>
+            <button class="btn btn-ghost btn-xs" onclick="mktTpl('checkup')">🏥 متابعة</button>
+            <button class="btn btn-ghost btn-xs" onclick="mktTpl('offer')">🎁 عرض</button>
+          </div>
+          <textarea class="form-control" id="mktMsg" placeholder="اكتب رسالتك هنا... {name} تُستبدل باسم المريض" style="min-height:80px;margin-bottom:10px"></textarea>
+          <div class="flex gap-8" style="flex-wrap:wrap">
+            <button class="btn btn-success btn-sm" onclick="mktSendAll()">💬 إرسال واتساب</button>
+            <button class="btn btn-ghost btn-sm" onclick="mktCopyNums()">📋 نسخ الأرقام</button>
+            <button class="btn btn-ghost btn-sm" onclick="mktExportCSV()">⬇️ CSV</button>
+          </div>
+        </div></div>
+        <div class="card"><div class="card-header">
+          <span class="card-title" id="mktListCount">المرضى</span>
+          <div class="flex gap-8">
+            <input type="checkbox" id="mktChkAll" onchange="mktToggleAll(this.checked)" style="width:16px;height:16px;accent-color:var(--blue2)">
+            <label for="mktChkAll" style="font-size:12px;font-weight:600">تحديد الكل</label>
+          </div>
+        </div><div class="tbl-wrap"><table>
+          <thead><tr><th style="width:36px"></th><th>الاسم</th><th>الهاتف</th><th>أنواع العلاج</th><th>الحالة</th><th></th></tr></thead>
+          <tbody id="mktBody"></tbody>
+        </table></div></div>
+      </div>
+
+      <!-- MY FILE (patient view) -->
+      <div class="page" id="pg-myfile">
+        <div class="page-hdr"><div class="page-hdr-title">👤 ملفي الطبي</div></div>
+        <div id="myNextAppt"></div>
+        <div id="myAds"></div>
+        <div class="stats-row" id="myStats"></div>
+        <div id="myDebt"></div>
+        <div id="myQuickActions"></div>
+        <div id="myPlansHdr" style="display:none;font-size:14px;font-weight:800;color:var(--gray6);margin:14px 0 10px;padding-right:4px">📋 خطط العلاج</div>
+        <div id="myPlans"></div>
+        <div id="myRecommendedArticles"></div>
+      </div>
+
+      <!-- ═══ MY PRESCRIPTIONS (patient-side) ═══ -->
+      <div class="page" id="pg-myrx">
+        <div class="page-hdr">
+          <button class="btn btn-ghost btn-sm" onclick="navTo('myfile')">← ملفي</button>
+          <div><div class="page-hdr-title">💊 وصفاتي الطبية</div><div class="page-hdr-sub">سجل الأدوية والنصائح</div></div>
+        </div>
+        <div id="myRxList"></div>
+      </div>
+
+      <!-- ═══ MY CONSENTS (patient-side) ═══ -->
+      <div class="page" id="pg-myconsents">
+        <div class="page-hdr">
+          <button class="btn btn-ghost btn-sm" onclick="navTo('myfile')">← ملفي</button>
+          <div><div class="page-hdr-title">📄 موافقاتي</div><div class="page-hdr-sub">الموافقات الطبية الموقّعة</div></div>
+        </div>
+        <div id="myConsentsList"></div>
+      </div>
+
+      <!-- TASKS -->
+      <div class="page" id="pg-tasks">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">📋 المهام</div><div class="page-hdr-sub" id="tasksSub">إدارة المهام اليومية</div></div>
+          <button class="btn btn-primary" id="newTaskBtn" onclick="openNewTask()">➕ مهمة جديدة</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm tk-tab active" data-tab="my" onclick="setTaskTab('my',this)">📌 مهامي</button>
+          <button class="btn btn-ghost btn-sm tk-tab" data-tab="assigned" onclick="setTaskTab('assigned',this)" id="tkTabAssigned" style="display:none">📤 أسندتها</button>
+          <button class="btn btn-ghost btn-sm tk-tab" data-tab="all" onclick="setTaskTab('all',this)" id="tkTabAll" style="display:none">📂 الكل</button>
+          <button class="btn btn-ghost btn-sm tk-tab" data-tab="done" onclick="setTaskTab('done',this)">✅ المنجزة</button>
+        </div>
+        <div id="tasksList"></div>
+      </div>
+
+      <!-- CHAT -->
+      <div class="page" id="pg-chat">
+        <div class="page-hdr"><div><div class="page-hdr-title">💬 المحادثات</div><div class="page-hdr-sub" id="chatHdrSub">قناة جماعية + رسائل خاصة</div></div>
+          <button class="btn btn-ghost btn-sm" onclick="showChatList()" id="chatBackBtn" style="display:none">← قائمة المحادثات</button>
+        </div>
+
+        <!-- Channel list view -->
+        <div id="chatListView">
+          <div style="display:flex;gap:6px;margin-bottom:10px;border-bottom:2px solid var(--border)">
+            <button class="btn btn-ghost btn-sm chat-tab active" data-tab="all" onclick="setChatTab('all',this)" style="border-bottom:3px solid var(--blue2);border-radius:0">📋 الكل</button>
+            <button class="btn btn-ghost btn-sm chat-tab" data-tab="dm" onclick="setChatTab('dm',this)" style="border-radius:0">💬 رسائل خاصة</button>
+          </div>
+          <div id="chatChannelsList"></div>
+          <button class="btn btn-primary btn-block" onclick="openNewDM()" style="margin-top:14px">✏️ رسالة خاصة جديدة</button>
+        </div>
+
+        <!-- Conversation view -->
+        <div id="chatConvView" style="display:none">
+          <div class="card" style="display:flex;flex-direction:column;height:calc(100vh - 240px);max-height:700px">
+            <div id="chatConvHeader" style="padding:10px 14px;border-bottom:1.5px solid var(--border);background:#fff;font-weight:800;font-size:14px;display:flex;align-items:center;gap:10px"></div>
+            <div id="chatBox" style="flex:1;overflow-y:auto;padding:14px;background:#f8fbfd;display:flex;flex-direction:column;gap:8px"></div>
+            <div style="display:flex;gap:6px;padding:10px;border-top:1.5px solid var(--border);background:#fff">
+              <input class="form-control" id="chatInput" placeholder="اكتب رسالتك..." onkeydown="if(event.key==='Enter')sendChat()" style="flex:1">
+              <button class="btn btn-primary" onclick="sendChat()">إرسال</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- NEW DM PICKER -->
+      <div class="overlay" id="mo-newDM"><div class="modal" style="max-width:380px">
+        <div class="modal-header"><span class="modal-title">✏️ رسالة خاصة جديدة</span><button class="modal-close" onclick="closeModal('mo-newDM')">✕</button></div>
+        <div class="modal-body">
+          <div style="font-size:12px;color:var(--gray5);margin-bottom:10px">اختر الشخص:</div>
+          <div id="dmStaffList" style="display:flex;flex-direction:column;gap:6px"></div>
+        </div>
+      </div></div>
+
+      <!-- ═══ REQUESTS (clinic-side: pending OTP, booking requests, inquiries) ═══ -->
+      <div class="page" id="pg-requests">
+        <div class="page-hdr">
+          <div><div class="page-hdr-title">📨 طلبات المرضى</div><div class="page-hdr-sub">إدارة الطلبات الواردة من بوابة المرضى</div></div>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm rq-tab active" data-tab="otp" onclick="setReqTab('otp',this)">🔐 طلبات الدخول <span id="rqBadgeOtp"></span></button>
+          <button class="btn btn-ghost btn-sm rq-tab" data-tab="bookings" onclick="setReqTab('bookings',this)">📅 طلبات الحجز <span id="rqBadgeBookings"></span></button>
+          <button class="btn btn-ghost btn-sm rq-tab" data-tab="inquiries" onclick="setReqTab('inquiries',this)">💬 الاستفسارات <span id="rqBadgeInquiries"></span></button>
+        </div>
+        <div id="requestsList"></div>
+      </div>
+
+      <!-- ═══ BOOK APPOINTMENT (patient-side) ═══ -->
+      <div class="page" id="pg-bookappt">
+        <div class="page-hdr"><div><div class="page-hdr-title">📅 طلب موعد جديد</div><div class="page-hdr-sub">اختر 3 أوقات مفضّلة وسنرتّب لك أنسب وقت</div></div></div>
+        <div class="card"><div class="card-body">
+          <div class="form-group">
+            <label>سبب الزيارة *</label>
+            <select class="form-control" id="baReason">
+              <option value="">-- اختر --</option>
+              <option value="فحص عام">فحص عام</option>
+              <option value="ألم في السن">ألم في السن</option>
+              <option value="تنظيف الأسنان">تنظيف الأسنان</option>
+              <option value="حشوة جديدة">حشوة جديدة</option>
+              <option value="استشارة تقويم">استشارة تقويم</option>
+              <option value="استشارة زراعة">استشارة زراعة</option>
+              <option value="تغيير سلك التقويم">تغيير سلك التقويم</option>
+              <option value="استبدال Aligners">استبدال Aligners</option>
+              <option value="تركيبات">تركيبات</option>
+              <option value="متابعة علاج">متابعة علاج</option>
+              <option value="other">أخرى (أكتب أدناه)</option>
+            </select>
+          </div>
+          <div class="form-group" id="baOtherReasonGroup" style="display:none">
+            <label>تفاصيل سبب الزيارة</label>
+            <textarea class="form-control" id="baOtherReason" rows="2" placeholder="اشرح سبب الزيارة..."></textarea>
+          </div>
+          <div class="form-group">
+            <label>ملاحظات إضافية (اختياري)</label>
+            <textarea class="form-control" id="baNotes" rows="2" placeholder="مثلاً: أعاني من ألم منذ يومين، حساسية من البنج..."></textarea>
+          </div>
+          <div style="background:#fef3c7;border:1.5px solid #fde047;border-radius:10px;padding:14px;margin:14px 0">
+            <div style="font-weight:800;font-size:13px;color:#854d0e;margin-bottom:6px">⏰ اختر 3 أوقات مفضلة بترتيب الأولوية:</div>
+            <div style="font-size:11px;color:#854d0e;margin-bottom:10px">سنتواصل معك لتأكيد الوقت الأنسب من ضمن خياراتك</div>
+            <div style="font-size:10px;color:#854d0e;background:#fffbeb;border-radius:6px;padding:6px 8px;margin-bottom:12px">🕘 ساعات العمل: 9:00 صباحاً — 9:00 مساءً</div>
+
+            <div style="background:#fff;border-radius:8px;padding:10px;margin-bottom:8px">
+              <div style="font-weight:700;font-size:12px;color:#854d0e;margin-bottom:8px">⭐ الخيار الأول</div>
+              <div class="form-row">
+                <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">التاريخ</label><input type="date" class="form-control" id="baDate1"></div>
+                <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">الوقت</label><select class="form-control" id="baTime1"></select></div>
+              </div>
+            </div>
+
+            <div style="background:#fff;border-radius:8px;padding:10px;margin-bottom:8px">
+              <div style="font-weight:700;font-size:12px;color:#854d0e;margin-bottom:8px">الخيار الثاني</div>
+              <div class="form-row">
+                <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">التاريخ</label><input type="date" class="form-control" id="baDate2"></div>
+                <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">الوقت</label><select class="form-control" id="baTime2"></select></div>
+              </div>
+            </div>
+
+            <div style="background:#fff;border-radius:8px;padding:10px">
+              <div style="font-weight:700;font-size:12px;color:#854d0e;margin-bottom:8px">الخيار الثالث</div>
+              <div class="form-row">
+                <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">التاريخ</label><input type="date" class="form-control" id="baDate3"></div>
+                <div class="form-group" style="margin-bottom:6px"><label style="font-size:11px">الوقت</label><select class="form-control" id="baTime3"></select></div>
+              </div>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" onclick="submitBookingRequest()" style="font-size:14px;padding:13px">📤 إرسال طلب الحجز</button>
+        </div></div>
+        <div id="myPastBookings" style="margin-top:14px"></div>
+      </div>
+
+      <!-- ═══ MY INQUIRIES (patient-side) ═══ -->
+      <div class="page" id="pg-myinquiries">
+        <div class="page-hdr"><div><div class="page-hdr-title">💬 استفساراتي</div><div class="page-hdr-sub">تواصل مباشر مع العيادة</div></div></div>
+        <div class="card" style="margin-bottom:14px"><div class="card-body">
+          <div class="form-group">
+            <label>أرسل استفساراً جديداً</label>
+            <textarea class="form-control" id="newInquiryText" rows="3" placeholder="اكتب سؤالك أو استفسارك للعيادة هنا..."></textarea>
+          </div>
+          <button class="btn btn-primary" onclick="submitInquiry()" style="width:100%">📤 إرسال الاستفسار</button>
+        </div></div>
+        <div id="inquiriesList"></div>
+      </div>
+
+      <!-- ═══ ARTICLES LIBRARY ═══ -->
+      <div class="page" id="pg-articles">
+        <div class="page-hdr"><div><div class="page-hdr-title">📚 المكتبة الطبية</div><div class="page-hdr-sub">دليلك الشامل للعناية بأسنانك</div></div></div>
+        <div style="margin-bottom:14px">
+          <input type="search" class="form-control" id="artSearch" placeholder="🔍 بحث في المقالات..." oninput="renderArticles()" style="margin-bottom:10px">
+          <div id="artCatFilter" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+        <div id="articlesList"></div>
+      </div>
+
+      <!-- ═══ SINGLE ARTICLE READER ═══ -->
+      <div class="page" id="pg-article">
+        <div class="page-hdr">
+          <button class="btn btn-ghost btn-sm" onclick="navTo('articles')">← المكتبة</button>
+        </div>
+        <div id="articleContent"></div>
+      </div>
+
+      <div class="page" id="pg-expenses">
+        <div class="page-hdr">
+          <h2 class="page-title">💸 الصرفيات</h2>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-success btn-sm" onclick="openAddExpense()" data-perm="expenses_add">+ إضافة صرفية</button>
+          </div>
+        </div>
+        <div class="stats-grid" id="expStats"></div>
+        <div class="card" style="margin:14px 0">
+          <div class="card-body">
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+              <select id="expFCat" class="form-control" style="max-width:160px;font-size:13px" onchange="renderExpenses()">
+                <option value="">كل الفئات</option>
+                <option value="lab">🔬 مختبر</option>
+                <option value="materials">🧪 مواد ومستهلكات</option>
+                <option value="rent">🏢 إيجار</option>
+                <option value="utility">⚡ كهرباء/ماء</option>
+                <option value="maintenance">🔧 صيانة</option>
+                <option value="salary">💵 راتب</option>
+                <option value="loan">💳 قرض</option>
+                <option value="marketing">📢 تسويق</option>
+                <option value="other">📌 أخرى</option>
+              </select>
+              <select id="expFSrc" class="form-control" style="max-width:140px;font-size:13px" onchange="renderExpenses()">
+                <option value="">كل المصادر</option>
+                <option value="manual">يدوي</option>
+                <option value="debt_payment">تسديد دين</option>
+                <option value="purchase_cash">شراء نقدي</option>
+              </select>
+              <input type="date" id="expFFrom" class="form-control" style="max-width:140px;font-size:13px" onchange="renderExpenses()">
+              <span style="font-size:12px;color:#64748b">إلى</span>
+              <input type="date" id="expFTo" class="form-control" style="max-width:140px;font-size:13px" onchange="renderExpenses()">
+              <button class="btn btn-ghost btn-xs" onclick="document.getElementById('expFCat').value='';document.getElementById('expFSrc').value='';document.getElementById('expFFrom').value='';document.getElementById('expFTo').value='';renderExpenses()">✕ مسح</button>
+            </div>
+            <div style="margin-top:10px;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:8px 10px;font-size:11px;color:#854d0e">
+              💡 الصرفيات الناتجة من <strong>تسديد دين</strong> أو <strong>شراء نقدي</strong> تُسجَّل تلقائياً ولا تُحذف من هنا — احذف الدين أو المشتريات الأصلية بدلاً من ذلك.
+            </div>
+          </div>
+        </div>
+        <div id="expList"></div>
+      </div>
+
+      <div class="page" id="pg-auditLog">
+        <div class="page-hdr">
+          <h2 class="page-title">📜 سجل التدقيق</h2>
+        </div>
+        <div style="background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:10px;margin-bottom:14px;font-size:12px;color:#3730a3">
+          🔍 يعرض هذا السجل جميع التعديلات الحساسة على البيانات: من قام بالتعديل، متى، ما هي القيم القديمة والجديدة، والسبب. ضروري للتدقيق المالي والطبي.
+        </div>
+        <div id="auditLogPanel"></div>
+      </div>
+
+      <!-- BOOKING REQUEST DETAIL MODAL (clinic-side) -->
+      <div class="overlay" id="mo-bookingDetail"><div class="modal modal-lg">
+        <div class="modal-header"><span class="modal-title">📅 تفاصيل طلب الحجز</span><button class="modal-close" onclick="closeModal('mo-bookingDetail')">✕</button></div>
+        <div class="modal-body" id="bookingDetailBody"></div>
+      </div></div>
+
+      <!-- INQUIRY DETAIL MODAL (clinic-side) -->
+      <div class="overlay" id="mo-inquiryDetail"><div class="modal modal-lg">
+        <div class="modal-header"><span class="modal-title">💬 الاستفسار</span><button class="modal-close" onclick="closeModal('mo-inquiryDetail')">✕</button></div>
+        <div class="modal-body" id="inquiryDetailBody"></div>
+      </div></div>
+
+    </div><!-- /main-content -->
+  </div><!-- /flex -->
+
+  <!-- BOTTOM NAV -->
+  <div class="bottom-nav"><div class="bn-list" id="bnList"></div></div>
+
+  <!-- CALL/BELL FAB BUTTON -->
+  <button id="bellFab" onclick="openCallStaff()" title="استدعاء كادر" style="display:none;position:fixed;bottom:78px;left:14px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;border:none;font-size:26px;cursor:pointer;z-index:399;box-shadow:0 4px 16px rgba(220,38,38,.4);transition:transform .15s">🔔</button>
+
+<!-- NOTIFICATION PANEL -->
+<div id="notifPanel" style="display:none;position:fixed;top:52px;left:0;right:0;background:#fff;z-index:300;border-bottom:2px solid var(--border);max-height:70vh;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,.15)">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border)">
+    <span style="font-weight:800;font-size:14px">🔔 الإشعارات</span>
+    <div style="display:flex;gap:8px">
+      <button onclick="clearNotifs()" style="background:none;border:none;font-size:12px;color:var(--gray4);cursor:pointer;font-family:Tajawal,sans-serif">مسح الكل</button>
+      <button onclick="toggleNotifPanel()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--gray4)">✕</button>
+    </div>
+  </div>
+  <div id="notifList" style="padding:8px 0"></div>
+</div>
+
+<!-- CALL STAFF MODAL (sender) -->
+<div class="overlay" id="mo-callStaff"><div class="modal" style="max-width:440px">
+  <div class="modal-header" style="background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff">
+    <span class="modal-title">🔔 استدعاء كادر</span>
+    <button class="modal-close" onclick="closeModal('mo-callStaff')" style="color:#fff">✕</button>
+  </div>
+  <div class="modal-body">
+    <div style="font-size:12px;color:var(--gray5);margin-bottom:10px;font-weight:600">اختر الشخص:</div>
+    <div id="callStaffList" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px"></div>
+    <div style="font-size:12px;color:var(--gray5);margin-bottom:8px;font-weight:600">السبب (اختياري):</div>
+    <div id="callReasons" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+    <input type="text" class="form-control" id="callCustomReason" placeholder="أو اكتب سبباً مخصصاً..." style="font-size:13px">
+    <input type="hidden" id="callTargetId" value="">
+    <div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:8px;padding:10px;margin-top:12px;font-size:12px;color:#991b1b;display:none" id="callTargetInfo"></div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-callStaff')">إلغاء</button>
+      <button class="btn" id="callSendBtn" style="background:#dc2626;color:#fff" onclick="sendCall()" disabled>🔔 إرسال الاستدعاء</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- INCOMING CALL MODAL (receiver) -->
+<div class="overlay" id="mo-incomingCall" style="z-index:9999">
+  <div class="modal" style="max-width:380px;border:3px solid #dc2626;animation:callPulse 1s infinite">
+    <div style="background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;padding:20px;text-align:center;border-radius:13px 13px 0 0">
+      <div style="font-size:48px;margin-bottom:8px">🔔</div>
+      <div style="font-size:20px;font-weight:900">استدعاء عاجل</div>
+      <div style="font-size:13px;opacity:.85;margin-top:4px">شخص يحتاجك في العيادة</div>
+    </div>
+    <div style="padding:20px;text-align:center">
+      <div style="font-size:14px;color:var(--gray5);margin-bottom:6px">من:</div>
+      <div id="incCallFrom" style="font-size:18px;font-weight:800;color:var(--blue);margin-bottom:14px"></div>
+      <div id="incCallReasonWrap" style="display:none;background:#fef2f2;border:1.5px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:14px">
+        <div style="font-size:11px;color:#991b1b;font-weight:700;margin-bottom:4px">السبب:</div>
+        <div id="incCallReason" style="font-size:14px;color:#7f1d1d;font-weight:600"></div>
+      </div>
+      <div id="incCallTime" style="font-size:11px;color:var(--gray4);margin-bottom:16px"></div>
+      <button class="btn" style="background:#16a34a;color:#fff;font-size:15px;padding:14px;width:100%" onclick="ackIncomingCall()">✅ تم — قادم/قادمة 🏃</button>
+    </div>
+  </div>
+</div>
+
+<style>
+@keyframes callPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); }
+  50% { box-shadow: 0 0 30px 12px rgba(220, 38, 38, 0); }
+}
+#bellFab:active { transform: scale(0.92); }
+#bellFab:hover { transform: scale(1.05); }
+</style>
+</div><!-- /app -->
+
+<!-- ══════════════════════════════════════════════════════
+     MODALS
+══════════════════════════════════════════════════════ -->
+
+<!-- ADD PATIENT -->
+<div class="overlay" id="mo-addPatient"><div class="modal">
+  <div class="modal-header"><span class="modal-title">➕ مريض جديد</span><button class="modal-close" onclick="closeModal('mo-addPatient')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-row"><div class="form-group"><label>الاسم الكامل *</label><input class="form-control" id="pName"></div><div class="form-group"><label>رقم الهاتف *</label><input class="form-control" id="pPhone" type="tel"></div></div>
+    <div class="form-row"><div class="form-group"><label>العمر</label><input class="form-control" id="pAge" type="number"></div><div class="form-group"><label>الجنس</label><select class="form-control" id="pGender"><option value="">-</option><option>ذكر</option><option>أنثى</option></select></div></div>
+    <div class="form-group"><label>العنوان</label><input class="form-control" id="pAddress"></div>
+    <div class="form-group"><label>التاريخ الطبي / الحساسيات</label><textarea class="form-control" id="pHistory"></textarea></div>
+    <div style="background:#eef6fb;border:1px dashed #a4c8dc;border-radius:8px;padding:10px;font-size:12px;color:var(--gray5);margin-bottom:10px">
+      💡 الفحص الأولي وتقييم الحالة الفموية يقوم بهما الطبيب من داخل ملف المريض عند أول زيارة، وليس عند تسجيل بياناته.
+    </div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-addPatient')">إلغاء</button><button class="btn btn-primary" onclick="savePatient()">💾 حفظ المريض</button></div>
+  </div>
+</div></div>
+
+<!-- INITIAL EXAM (الفحص الأولي / تقييم الحالة الفموية) -->
+<div class="overlay" id="mo-initExam"><div class="modal modal-lg">
+  <div class="modal-header"><span class="modal-title">🦷 الفحص الأولي للمريض</span><button class="modal-close" onclick="closeModal('mo-initExam')">✕</button></div>
+  <div class="modal-body">
+    <div id="examPatientHdr" style="background:var(--blue-lt);border-radius:8px;padding:10px;margin-bottom:12px;font-size:13px;font-weight:700;color:var(--blue)"></div>
+    <div style="border:1.5px solid var(--blue2);border-radius:var(--r);padding:14px;background:var(--blue-lt);margin-bottom:12px">
+      <div style="font-size:13px;font-weight:800;color:var(--blue);margin-bottom:10px">🦷 تقييم الحالة الفموية الحالية</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px" id="oralAssessGrid">
+        <div class="oral-item" onclick="oralToggle(this,'filling_simple')" data-key="filling_simple">
+          <div class="oral-icon">🪥</div><div class="oral-lbl">تسوس بسيط</div>
+          <div class="oral-cnt"><input type="number" min="0" max="32" value="0" class="oral-num" onclick="event.stopPropagation()" oninput="oralUpdateCount(this,'filling_simple')"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'filling_deep')" data-key="filling_deep">
+          <div class="oral-icon">🔴</div><div class="oral-lbl">تسوس عميق</div>
+          <div class="oral-cnt"><input type="number" min="0" max="32" value="0" class="oral-num" onclick="event.stopPropagation()" oninput="oralUpdateCount(this,'filling_deep')"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'nerve')" data-key="nerve">
+          <div class="oral-icon">🩺</div><div class="oral-lbl">بحاجة عصب</div>
+          <div class="oral-cnt"><input type="number" min="0" max="32" value="0" class="oral-num" onclick="event.stopPropagation()" oninput="oralUpdateCount(this,'nerve')"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'extraction')" data-key="extraction">
+          <div class="oral-icon">🔩</div><div class="oral-lbl">بحاجة قلع</div>
+          <div class="oral-cnt"><input type="number" min="0" max="32" value="0" class="oral-num" onclick="event.stopPropagation()" oninput="oralUpdateCount(this,'extraction')"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'missing')" data-key="missing">
+          <div class="oral-icon">❌</div><div class="oral-lbl">أسنان مفقودة</div>
+          <div class="oral-cnt"><input type="number" min="0" max="32" value="0" class="oral-num" onclick="event.stopPropagation()" oninput="oralUpdateCount(this,'missing')"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'crown')" data-key="crown">
+          <div class="oral-icon">👑</div><div class="oral-lbl">بحاجة تيجان/جسر</div>
+          <div class="oral-cnt"><input type="number" min="0" max="32" value="0" class="oral-num" onclick="event.stopPropagation()" oninput="oralUpdateCount(this,'crown')"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'ortho')" data-key="ortho">
+          <div class="oral-icon">🔧</div><div class="oral-lbl">ازدحام / يحتاج تقويم</div>
+          <div class="oral-cnt"><input style="display:none"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'bite')" data-key="bite">
+          <div class="oral-icon">😬</div><div class="oral-lbl">مشاكل إطباق</div>
+          <div class="oral-cnt"><input style="display:none"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'cleaning')" data-key="cleaning">
+          <div class="oral-icon">✨</div><div class="oral-lbl">يحتاج تنظيف جير</div>
+          <div class="oral-cnt"><input style="display:none"></div>
+        </div>
+        <div class="oral-item" onclick="oralToggle(this,'healthy')" data-key="healthy">
+          <div class="oral-icon">✅</div><div class="oral-lbl">أسنان سليمة</div>
+          <div class="oral-cnt"><input style="display:none"></div>
+        </div>
+      </div>
+      <div id="oralSuggestions" style="margin-top:10px;font-size:11px;font-weight:700;color:var(--blue2);display:none"></div>
+    </div>
+    <div class="form-group"><label>ملاحظات الفحص الأولي</label><textarea class="form-control" id="examNotes" style="min-height:60px" placeholder="ملاحظات سريرية، شكاوى المريض، أولويات العلاج..."></textarea></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-initExam')">إلغاء</button><button class="btn btn-primary" onclick="saveInitExam()">💾 حفظ الفحص</button></div>
+  </div>
+</div></div>
+
+<!-- ADD APPOINTMENT -->
+<!-- ═══ ADD CLINIC DEBT (مستحق على العيادة) ═══ -->
+<!-- ═══ ADD/EDIT VENDOR ═══ -->
+<div class="overlay" id="mo-addVendor"><div class="modal">
+  <div class="modal-header"><span class="modal-title">🏢 جهة (مختبر / مكتب / مورد)</span><button class="modal-close" onclick="closeModal('mo-addVendor')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-row">
+      <div class="form-group"><label>اسم الجهة *</label><input class="form-control" id="venName" placeholder="مثال: مختبر السلام للتركيبات"></div>
+      <div class="form-group"><label>النوع *</label>
+        <select class="form-control" id="venType">
+          <option value="lab">🔬 مختبر تركيبات</option>
+          <option value="dental_office">🦷 مكتب أسنان</option>
+          <option value="supplier">📦 مورد مواد</option>
+          <option value="equipment">🛠️ صيانة/أجهزة</option>
+          <option value="radiology">📷 أشعة</option>
+          <option value="other">📌 أخرى</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>📞 رقم الهاتف</label><input class="form-control" id="venPhone" type="tel" placeholder="07..." dir="ltr"></div>
+      <div class="form-group"><label>📱 رقم الواتساب (إن اختلف)</label><input class="form-control" id="venWhatsapp" type="tel" placeholder="07..." dir="ltr"></div>
+    </div>
+    <div class="form-group"><label>👤 اسم الشخص المسؤول</label><input class="form-control" id="venContact" placeholder="مثال: أبو محمد / مهندس علي"></div>
+    <div class="form-group"><label>🎯 التخصّص / الخدمات</label><input class="form-control" id="venSpecialty" placeholder="مثال: زركون، تيجان، أطقم متحركة، تقويم"></div>
+    <div class="form-group"><label>📍 العنوان</label><input class="form-control" id="venAddress" placeholder="المنطقة، الشارع..."></div>
+    <div class="form-group"><label>📝 ملاحظات</label><textarea class="form-control" id="venNotes" style="min-height:60px" placeholder="مدّة الإنجاز، شروط الدفع، تجاربك معه..."></textarea></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-addVendor')">إلغاء</button><button class="btn btn-primary" onclick="saveVendor()">💾 حفظ</button></div>
+  </div>
+</div></div>
+
+<div class="overlay" id="mo-addClinicDebt"><div class="modal">
+  <div class="modal-header"><span class="modal-title">💼 إضافة دين على العيادة</span><button class="modal-close" onclick="closeModal('mo-addClinicDebt')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-row">
+      <div class="form-group"><label>الجهة الدائنة *</label><input class="form-control" id="cdCreditor" placeholder="اسم المختبر، التاجر، المالك..."></div>
+      <div class="form-group"><label>الفئة</label>
+        <select class="form-control" id="cdCategory">
+          <option>مختبر</option><option>مواد</option><option>إيجار</option><option>كهرباء/ماء</option><option>صيانة</option><option>قرض</option><option>راتب</option><option>أخرى</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>المبلغ الكلّي (د.ع) *</label><input type="number" class="form-control" id="cdAmount" placeholder="0"></div>
+      <div class="form-group"><label>هاتف الجهة (اختياري)</label><input class="form-control" id="cdPhone" type="tel" placeholder="07..." dir="ltr"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>تاريخ الاستحقاق</label><input type="date" class="form-control" id="cdDueDate"></div>
+      <div class="form-group"><label>التاريخ</label><input type="date" class="form-control" id="cdCreatedAt"></div>
+    </div>
+    <div class="form-group"><label>ملاحظات</label><textarea class="form-control" id="cdNotes" style="min-height:60px" placeholder="فاتورة رقم، تفاصيل..."></textarea></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-addClinicDebt')">إلغاء</button><button class="btn btn-primary" onclick="saveClinicDebt()">💾 حفظ الدين</button></div>
+  </div>
+</div></div>
+
+<!-- ═══ PAY CLINIC DEBT (تسديد دفعة) ═══ -->
+<div class="overlay" id="mo-payClinicDebt"><div class="modal">
+  <div class="modal-header"><span class="modal-title">💰 تسديد دفعة</span><button class="modal-close" onclick="closeModal('mo-payClinicDebt')">✕</button></div>
+  <div class="modal-body">
+    <div id="cdPayInfo" style="background:#f8fafc;padding:10px;border-radius:8px;margin-bottom:12px;font-size:12px"></div>
+    <div class="form-row">
+      <div class="form-group"><label>المبلغ المدفوع *</label><input type="number" class="form-control" id="cdPayAmount" placeholder="0"></div>
+      <div class="form-group"><label>التاريخ</label><input type="date" class="form-control" id="cdPayDate"></div>
+    </div>
+    <div class="form-group"><label>طريقة الدفع</label>
+      <select class="form-control" id="cdPayMethod"><option>نقد</option><option>تحويل بنكي</option><option>شيك</option><option>أخرى</option></select>
+    </div>
+    <div class="form-group"><label>ملاحظات</label><input class="form-control" id="cdPayNotes" placeholder="رقم الإيصال، تفاصيل..."></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-payClinicDebt')">إلغاء</button><button class="btn btn-success" onclick="saveClinicDebtPayment()">💾 حفظ + إرسال تأكيد عبر واتساب</button></div>
+  </div>
+</div></div>
+
+<!-- ═══ DOCTOR SETTLEMENT (تصفية حساب طبيب) ═══ -->
+<div class="overlay" id="mo-settlement"><div class="modal modal-lg">
+  <div class="modal-header"><span class="modal-title">💵 تصفية حساب طبيب</span><button class="modal-close" onclick="closeModal('mo-settlement')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-group"><label>الطبيب *</label><select class="form-control" id="settDoc" onchange="onSettDocChange()"></select></div>
+
+    <!-- Current running balance display -->
+    <div id="settBalanceBox" style="display:none;background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:10px;margin-bottom:10px;font-size:12px"></div>
+
+    <div class="form-group" style="margin-bottom:8px">
+      <label style="font-size:11px">⚡ فترة سريعة</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+        <button type="button" class="btn btn-ghost btn-xs" onclick="settQuickPeriod('today')">📅 اليوم</button>
+        <button type="button" class="btn btn-ghost btn-xs" onclick="settQuickPeriod('yesterday')">⬅️ أمس</button>
+        <button type="button" class="btn btn-ghost btn-xs" onclick="settQuickPeriod('thisWeek')">📆 هذا الأسبوع</button>
+        <button type="button" class="btn btn-ghost btn-xs" onclick="settQuickPeriod('lastWeek')">🗓️ الأسبوع السابق</button>
+        <button type="button" class="btn btn-ghost btn-xs" onclick="settQuickPeriod('thisMonth')">📊 هذا الشهر</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>من تاريخ *</label><input type="date" class="form-control" id="settFrom" onchange="recalcSettSuggestion()"></div>
+      <div class="form-group"><label>إلى تاريخ *</label><input type="date" class="form-control" id="settTo" onchange="recalcSettSuggestion()"></div>
+    </div>
+
+    <div id="settSuggestion" style="background:#f0f9ff;border:1px solid #7dd3fc;border-radius:8px;padding:10px;margin-bottom:10px;font-size:12px;display:none"></div>
+
+    <!-- Two separate amount fields: handover + commission paid -->
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:10px">
+      <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:10px">💰 مبالغ هذه التصفية</div>
+
+      <div class="form-row">
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px;color:#16a34a">📥 المبلغ الذي سلّمه الطبيب للعيادة (من المقبوضات)</label>
+          <input type="number" class="form-control" id="settHandover" placeholder="0" oninput="updateSettPreview()">
+          <div style="font-size:10px;color:#94a3b8;margin-top:2px">عادة كل المقبوضات التي قبضها الطبيب اليوم</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-size:11px;color:#0d5c7a">📤 المبلغ الذي تسلّمه الطبيب من عمولته</label>
+          <input type="number" class="form-control" id="settCommPaid" placeholder="0" oninput="updateSettPreview()">
+          <div style="font-size:10px;color:#94a3b8;margin-top:2px">يمكن صفر إن أراد الطبيب تأجيل استلام نسبته</div>
+        </div>
+      </div>
+
+      <!-- Live preview of net effect on balance -->
+      <div id="settPreview" style="margin-top:10px;padding:8px;background:#fff;border-radius:6px;font-size:11px;display:none"></div>
+    </div>
+
+    <div class="form-group"><label>المنفّذ (من قام بالعملية)</label>
+      <select class="form-control" id="settHandler"></select>
+      <div style="font-size:10px;color:#94a3b8;margin-top:4px">عادة د. أحمد عبيد (صاحب العيادة) أو د. محمد ضياء (إداري)</div>
+    </div>
+    <div class="form-group"><label>تاريخ التصفية</label><input type="date" class="form-control" id="settDate"></div>
+    <div class="form-group"><label>ملاحظات</label><textarea class="form-control" id="settNotes" style="min-height:50px" placeholder="تفاصيل إضافية..."></textarea></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-settlement')">إلغاء</button><button class="btn btn-primary" onclick="saveSettlement()">💾 حفظ التصفية</button></div>
+  </div>
+</div></div>
+
+<div class="overlay" id="mo-editAppt"><div class="modal">
+  <div class="modal-header"><span class="modal-title">✏️ تعديل الموعد</span><button class="modal-close" onclick="closeModal('mo-editAppt')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="editApptId">
+    <div id="editApptCurrent" style="background:#f0f9ff;border:1.5px solid #bfdbfe;border-radius:10px;padding:10px;margin-bottom:12px;font-size:12px;color:#1e40af;line-height:1.7"></div>
+    <div class="form-row">
+      <div class="form-group"><label>الطبيب *</label><select class="form-control" id="editApptDoc"></select></div>
+      <div class="form-group"><label>سبب الحجز *</label><input class="form-control" id="editApptType" placeholder="كشف، حشوة..."></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>التاريخ الجديد *</label><input type="date" class="form-control" id="editApptDate"></div>
+      <div class="form-group"><label>الوقت الجديد *</label><select class="form-control" id="editApptTime"></select></div>
+    </div>
+    <div style="font-size:11px;color:var(--gray5);background:#f8fafc;border-radius:6px;padding:6px 8px;margin:-4px 0 8px">🕘 ساعات العمل: 9 ص — 9 م • فارق ٢٥ دقيقة على الأقل</div>
+    <div class="form-group">
+      <label>سبب التعديل (يظهر للمريض في الرسالة)</label>
+      <select class="form-control" id="editApptReason" onchange="onEditReasonChange()">
+        <option value="">-- اختر سبب التعديل --</option>
+        <option value="ظرف طارئ في العيادة">ظرف طارئ في العيادة</option>
+        <option value="غياب الطبيب">غياب الطبيب</option>
+        <option value="إعادة جدولة لتوفير وقت أنسب">إعادة جدولة لتوفير وقت أنسب</option>
+        <option value="بناءً على طلب المريض">بناءً على طلب المريض</option>
+        <option value="تعارض مع موعد آخر">تعارض مع موعد آخر</option>
+        <option value="other">سبب آخر (اكتبه)</option>
+      </select>
+    </div>
+    <div class="form-group" id="editApptReasonOtherBox" style="display:none">
+      <textarea class="form-control" id="editApptReasonOther" rows="2" placeholder="اكتب السبب..."></textarea>
+    </div>
+    <div class="form-group"><label>ملاحظات داخلية</label><textarea class="form-control" id="editApptNotes" style="min-height:50px"></textarea></div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-editAppt')">إلغاء</button>
+      <button class="btn btn-primary" onclick="saveEditAppt(false)">💾 حفظ فقط</button>
+      <button class="btn btn-success" onclick="saveEditAppt(true)">💚 حفظ + اقتراح رسالة واتساب</button>
+    </div>
+  </div>
+</div></div>
+
+<div class="overlay" id="mo-addAppt"><div class="modal">
+  <div class="modal-header"><span class="modal-title">📅 موعد جديد</span><button class="modal-close" onclick="closeModal('mo-addAppt')">✕</button></div>
+  <div class="modal-body">
+    <!-- Mode toggle: existing patient vs new quick patient -->
+    <div style="display:flex;gap:6px;margin-bottom:12px">
+      <button type="button" class="btn btn-sm" id="apptModeExist" onclick="apptSetMode('exist')" style="flex:1">🔎 مريض مسجّل</button>
+      <button type="button" class="btn btn-sm btn-ghost" id="apptModeNew"   onclick="apptSetMode('new')"   style="flex:1">➕ مريض جديد سريع</button>
+    </div>
+    <!-- Existing patient picker -->
+    <div id="apptModeExistBox">
+      <div class="form-group"><label>المريض *</label>
+        <input class="form-control" id="apptPatSearch" placeholder="ابحث بالاسم أو رقم الهاتف..." oninput="apptFilterPats()" autocomplete="off">
+        <select class="form-control" id="apptPat" size="5" style="margin-top:6px;display:none" onchange="apptOnPickExisting()"></select>
+        <div id="apptPatHint" class="text-muted" style="font-size:11px;margin-top:4px"></div>
+      </div>
+    </div>
+    <!-- Quick new patient -->
+    <div id="apptModeNewBox" style="display:none">
+      <div class="form-row">
+        <div class="form-group"><label>اسم المريض *</label><input class="form-control" id="apptNewName" placeholder="الاسم الكامل"></div>
+        <div class="form-group"><label>رقم الهاتف *</label><input class="form-control" id="apptNewPhone" type="tel" placeholder="07XXXXXXXXX"></div>
+      </div>
+      <div class="text-muted" style="font-size:11px;margin-top:-6px;margin-bottom:8px">سيُنشأ ملف مبدئي للمريض ويمكن إكمال بياناته لاحقاً.</div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group"><label>الطبيب *</label><select class="form-control" id="apptDoc"></select></div>
+      <div class="form-group"><label>سبب الحجز *</label>
+        <input class="form-control" id="apptType" list="apptTypeList" placeholder="كشف، حشوة، قلع، تقويم...">
+        <datalist id="apptTypeList">
+          <option value="كشف">
+          <option value="حشوة جديدة">
+          <option value="قلع">
+          <option value="تنظيف">
+          <option value="استشارة تقويم">
+          <option value="استشارة زراعة">
+          <option value="استشارة ابتسامة">
+          <option value="متابعة">
+          <option value="مراجعة">
+        </datalist>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>التاريخ *</label><input type="date" class="form-control" id="apptDate"></div>
+      <div class="form-group"><label>الوقت *</label><select class="form-control" id="apptTime"></select></div>
+    </div>
+    <div style="font-size:11px;color:var(--gray5);background:#f8fafc;border-radius:6px;padding:6px 8px;margin:-4px 0 8px">🕘 ساعات العمل: 9 ص — 9 م • فارق ٢٥ دقيقة على الأقل بين كل حجزين لنفس الطبيب</div>
+    <div class="form-group"><label>ملاحظات</label><textarea class="form-control" id="apptNotes" style="min-height:50px"></textarea></div>
+
+    <div id="apptBookedByBox" style="font-size:12px;color:var(--gray5);background:var(--gray1);border-radius:8px;padding:8px 10px;margin-bottom:8px"></div>
+
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-addAppt')">إلغاء</button><button class="btn btn-primary" onclick="saveAppt()">💾 حجز الموعد</button></div>
+  </div>
+</div></div>
+
+<!-- ADD PLAN -->
+<div class="overlay" id="mo-addPlan"><div class="modal modal-lg">
+  <div class="modal-header"><span class="modal-title">📋 خطة علاج جديدة</span><button class="modal-close" onclick="closeModal('mo-addPlan')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-row">
+      <div class="form-group"><label>نوع العلاج *</label>
+        <select class="form-control" id="tpType" onchange="onPlanTypeChange()">
+          <option value="general">🔬 علاج عام</option>
+          <option value="implant">🦷 زراعة أسنان</option>
+          <option value="ortho">🔧 تقويم أسنان</option>
+          <option value="smile">✨ تصميم ابتسامة</option>
+          <option value="filling">🪥 حشوات</option>
+          <option value="extraction">🔩 قلع</option>
+        </select>
+      </div>
+      <div class="form-group"><label>الطبيب المسؤول</label><select class="form-control" id="tpDoc"></select></div>
+    </div>
+    <div class="form-group"><label>وصف العلاج *</label><input class="form-control" id="tpDesc" placeholder="حشوة ضرس، زراعة سن..."></div>
+    <div class="form-row">
+      <div class="form-group"><label>عدد الجلسات</label><input class="form-control" id="tpSess" type="number" value="1" min="1"></div>
+      <div class="form-group"><label>التكلفة التقديرية (د.ع)</label><input class="form-control" id="tpCost" type="number" placeholder="0"><div style="font-size:10px;color:var(--gray5);margin-top:3px">💡 سعر تقريبي — يُثبَّت السعر النهائي عند فتح الجلسة الأولى</div></div>
+    </div>
+    <!-- Dental Chart -->
+    <div class="form-group"><label>🦷 الأسنان المشمولة — اضغط لتحديد</label>
+      <div class="dc-wrap">
+        <div class="dc-label">الفك العلوي ⬆</div>
+        <div class="dc-row" id="dcUR"></div>
+        <div class="dc-row" style="margin-top:3px" id="dcUL"></div>
+        <div style="border-bottom:2px dashed var(--gray3);margin:6px 10px"></div>
+        <div class="dc-row" id="dcLL"></div>
+        <div class="dc-row" style="margin-top:3px" id="dcLR"></div>
+        <div class="dc-label" style="margin-top:5px">⬇ الفك السفلي</div>
+        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-xs btn-ghost" onclick="dcSelectAll()">تحديد الكل</button>
+          <button type="button" class="btn btn-xs btn-ghost" onclick="dcSelectUpper()">الفك العلوي</button>
+          <button type="button" class="btn btn-xs btn-ghost" onclick="dcSelectLower()">الفك السفلي</button>
+          <button type="button" class="btn btn-xs btn-ghost" onclick="dcClearAll()">مسح الكل</button>
+        </div>
+      </div>
+      <div id="dcDisplay" style="font-size:12px;font-weight:700;color:var(--blue2);background:var(--blue-lt);border-radius:6px;padding:6px 10px;min-height:28px;margin-top:6px">لم يتم تحديد أسنان</div>
+      <input type="hidden" id="tpTeeth">
+    </div>
+    <!-- Implant extras -->
+    <div id="tpImplantExtra" style="display:none">
+      <div class="form-row">
+        <div class="form-group"><label>شركة الزرعة</label><input class="form-control" id="tpImpCo"></div>
+        <div class="form-group"><label>قياس الزرعة</label><input class="form-control" id="tpImpSize"></div>
+      </div>
+      <div class="form-group"><label>الدفعة الأولى (د.ع)</label><input class="form-control" id="tpImpPaid" type="number" placeholder="0"></div>
+    </div>
+    <!-- Ortho extras -->
+    <div id="tpOrthoExtra" style="display:none">
+      <div class="form-row">
+        <div class="form-group"><label>نوع الجهاز</label>
+          <select class="form-control" id="tpOrthoDev"><option value="">-- اختر --</option><option>براكيت معدني</option><option>براكيت سيراميك</option><option>شفاف (Aligner)</option><option>لساني</option></select>
+        </div>
+        <div class="form-group"><label>شركة الجهاز</label><input class="form-control" id="tpOrthoCo"></div>
+      </div>
+      <div class="form-group"><label>ملاحظات التقويم</label><textarea class="form-control" id="tpOrthoNotes" style="min-height:60px"></textarea></div>
+    </div>
+    <div class="form-group"><label>ملاحظات عامة</label><textarea class="form-control" id="tpNotes" style="min-height:60px"></textarea></div>
+    <div id="tpMktInfo" style="display:none;background:#fff7ed;border:1.5px solid #fb923c;border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:#9a3412"></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-addPlan')">إلغاء</button><button class="btn btn-primary" onclick="savePlan()">💾 حفظ الخطة</button></div>
+  </div>
+</div></div>
+
+<!-- SESSION -->
+<div class="overlay" id="mo-session"><div class="modal modal-lg">
+  <div class="modal-header"><span class="modal-title" id="sessTitle">📝 تسجيل الجلسة</span><button class="modal-close" onclick="closeModal('mo-session')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="sessPlanId"><input type="hidden" id="sessIdx">
+    <div class="form-group"><label>العمل المنجز في هذه الجلسة *</label><textarea class="form-control" id="sessWork" style="min-height:80px" placeholder="وصف دقيق للعمل المنجز..."></textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>الطبيب المنفذ</label><select class="form-control" id="sessDoc"></select></div>
+      <div class="form-group"><label>تاريخ الجلسة</label><input type="date" class="form-control" id="sessDate"></div>
+    </div>
+    <div class="form-group"><label>المبلغ المدفوع في هذه الجلسة (د.ع)</label>
+      <input class="form-control" id="sessPaid" type="number" value="0" oninput="sessCalcNet()">
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px" id="sessQuickAmt"></div>
+    </div>
+    <div style="background:var(--orange-lt);border:1.5px solid #e8a020;border-radius:var(--r);padding:12px;margin-bottom:12px">
+      <div style="font-size:12px;font-weight:700;color:var(--orange);margin-bottom:8px">🏷️ خصم (اختياري)</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px" id="sessDiscBtns">
+        <button type="button" class="btn btn-xs" style="background:#fff;border:1.5px solid var(--orange);color:var(--orange);font-weight:700" onclick="sessSetDisc(5000)">5,000</button>
+        <button type="button" class="btn btn-xs" style="background:#fff;border:1.5px solid var(--orange);color:var(--orange);font-weight:700" onclick="sessSetDisc(10000)">10,000</button>
+        <button type="button" class="btn btn-xs" style="background:#fff;border:1.5px solid var(--orange);color:var(--orange);font-weight:700" onclick="sessSetDisc(15000)">15,000</button>
+        <button type="button" class="btn btn-xs" style="background:#fff;border:1.5px solid var(--orange);color:var(--orange);font-weight:700" onclick="sessSetDisc(20000)">20,000</button>
+        <button type="button" class="btn btn-xs" style="background:#fff;border:1.5px solid var(--orange);color:var(--orange);font-weight:700" onclick="sessSetDisc(25000)">25,000</button>
+        <button type="button" class="btn btn-xs" style="background:#fff;border:1.5px solid var(--orange);color:var(--orange);font-weight:700" onclick="sessSetDisc(50000)">50,000</button>
+        <button type="button" class="btn btn-xs btn-ghost" onclick="document.getElementById('sessDiscount').value=0;sessCalcNet()">✕ مسح</button>
+      </div>
+      <input class="form-control" id="sessDiscount" type="number" value="0" placeholder="أو اكتب مبلغ الخصم يدوياً" oninput="sessCalcNet()">
+      <div id="sessNetResult" style="margin-top:8px;font-size:13px;font-weight:700;color:var(--blue2);display:none"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>📅 موعد الجلسة القادمة</label><input type="date" class="form-control" id="sessNextDate"></div>
+      <div class="form-group"><label>الوقت</label><select class="form-control" id="sessNextTime"></select></div>
+    </div>
+    <div class="form-group"><label>ملاحظات</label><textarea class="form-control" id="sessNotes" style="min-height:60px"></textarea></div>
+    <!-- Session Rating (Ortho only) -->
+    <div id="sessRatingBox" style="display:none;background:#fef3ff;border:1.5px solid #c084fc;border-radius:var(--r);padding:14px;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;color:#6c2fa0;margin-bottom:10px">⭐ تقييم الجلسة</div>
+      <div style="display:grid;grid-template-columns:1fr;gap:12px">
+        <div>
+          <div style="font-size:12px;font-weight:600;color:#5a1f7f;margin-bottom:6px">🪥 النظافة الفموية</div>
+          <div class="star-row" data-rating-key="hygiene" style="display:flex;gap:6px"></div>
+          <div style="font-size:10px;color:#888;margin-top:4px" id="sessRatingHygieneLbl"></div>
+        </div>
+        <div>
+          <div style="font-size:12px;font-weight:600;color:#5a1f7f;margin-bottom:6px">📋 الالتزام العام (المواعيد، التعليمات، المطاطات)</div>
+          <div class="star-row" data-rating-key="compliance" style="display:flex;gap:6px"></div>
+          <div style="font-size:10px;color:#888;margin-top:4px" id="sessRatingComplianceLbl"></div>
+        </div>
+      </div>
+      <div style="border-top:1px dashed #c084fc;margin-top:12px;padding-top:10px">
+        <div style="font-size:11px;font-weight:600;color:#5a1f7f;margin-bottom:6px">📱 رسالة جاهزة عن الجهاز:</div>
+        <button type="button" class="btn btn-sm" style="background:#6c2fa0;color:#fff;border:none;width:100%;font-weight:700" onclick="odOpenPickerFromSession()">📱 اختر رسالة جهاز للإرسال عبر واتساب</button>
+      </div>
+    </div>
+    <!-- Prescription -->
+    <div style="border:1.5px solid var(--border);border-radius:var(--r);padding:14px;margin-top:8px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:10px;color:var(--blue2)">💊 الوصفة الطبية والنصائح</div>
+      <div style="font-size:11px;font-weight:600;color:var(--gray5);margin-bottom:6px">أدوية شائعة:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px" id="rxDrugSugg"></div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <input class="form-control" id="rxDrugSearch" placeholder="بحث عن دواء..." oninput="rxRenderDrugs(this.value)" style="flex:1">
+        <button class="btn btn-ghost btn-sm" onclick="rxAddCustom()">+ يدوي</button>
+      </div>
+      <div id="rxMedsList"></div>
+      <div style="font-size:12px;font-weight:700;color:var(--gray5);margin:10px 0 6px">🌿 نصائح ما بعد العلاج:</div>
+      <div id="rxTipsSugg" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px"></div>
+      <div id="rxTipsList"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-session')">إلغاء</button>
+      <button class="btn btn-ghost btn-sm" onclick="rxPrint()">🖨️ طباعة الوصفة</button>
+      <button class="btn btn-primary" onclick="saveSession()">✔ حفظ الجلسة</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- COMPLETE PLAN -->
+<div class="overlay" id="mo-completePlan"><div class="modal">
+  <div class="modal-header"><span class="modal-title">✅ إكمال خطة العلاج</span><button class="modal-close" onclick="closeModal('mo-completePlan')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="cpPlanId">
+    <div class="alert alert-warning" id="cpInfo">⚠️ ماذا تريد أن تفعل بالمبلغ المتبقي؟</div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px">
+      <div onclick="cpSelect('paid')" id="cpOpt-paid" style="border:1.5px solid var(--border);border-radius:var(--r);padding:12px;cursor:pointer;transition:.15s">
+        <div class="fw-700">💳 تم الدفع الكامل</div><div class="text-muted mt-4">المريض دفع المبلغ المتبقي كاملاً الآن</div>
+      </div>
+      <div onclick="cpSelect('edit')" id="cpOpt-edit" style="border:1.5px solid var(--border);border-radius:var(--r);padding:12px;cursor:pointer;transition:.15s">
+        <div class="fw-700">✏️ تعديل السعر النهائي</div><div class="text-muted mt-4">تغيير التكلفة الكلية (خصم أو تعديل)</div>
+      </div>
+      <div onclick="cpSelect('debt')" id="cpOpt-debt" style="border:1.5px solid var(--border);border-radius:var(--r);padding:12px;cursor:pointer;transition:.15s">
+        <div class="fw-700">📌 يبقى في ذمة المريض</div><div class="text-muted mt-4">تسجيل المبلغ المتبقي كدين على المريض</div>
+      </div>
+    </div>
+    <div id="cpExtraFields"></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-completePlan')">إلغاء</button><button class="btn btn-success" onclick="confirmComplete()">✅ تأكيد الإكمال</button></div>
+  </div>
+</div></div>
+
+<!-- SETTLE DEBT -->
+<div class="overlay" id="mo-settleDebt"><div class="modal">
+  <div class="modal-header"><span class="modal-title">💰 تسوية الدين</span><button class="modal-close" onclick="closeModal('mo-settleDebt')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="sdPlanId">
+    <div id="sdInfo" class="alert alert-warning" style="margin-bottom:14px"></div>
+    <div class="form-group"><label>المبلغ المدفوع (د.ع)</label><input class="form-control" id="sdAmt" type="number"></div>
+    <div class="form-group"><label>ملاحظة</label><input class="form-control" id="sdNote"></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-settleDebt')">إلغاء</button><button class="btn btn-success" onclick="confirmSettleDebt()">💳 تسجيل الدفع</button></div>
+  </div>
+</div></div>
+
+<!-- IMPLANT PAYMENT -->
+<div class="overlay" id="mo-impPay"><div class="modal">
+  <div class="modal-header"><span class="modal-title">💳 دفعة إضافية - زراعة</span><button class="modal-close" onclick="closeModal('mo-impPay')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="impPayPlanId">
+    <div class="form-group"><label>المبلغ (د.ع) *</label><input class="form-control" id="impPayAmt" type="number"></div>
+    <div class="form-group"><label>ملاحظة</label><input class="form-control" id="impPayNote"></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-impPay')">إلغاء</button><button class="btn btn-primary" onclick="saveImpPay()">إضافة الدفعة</button></div>
+  </div>
+</div></div>
+
+<!-- NEW CONSENT -->
+<div class="overlay" id="mo-newConsent"><div class="modal modal-lg">
+  <div class="modal-header"><span class="modal-title">📄 موافقة جديدة</span><button class="modal-close" onclick="closeModal('mo-newConsent')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-group"><label>نوع الموافقة *</label>
+      <select class="form-control" id="csType" onchange="csOnTypeChange()">
+        <option value="general">علاج عام</option>
+        <option value="cleaning">تنظيف الأسنان</option>
+        <option value="implant">زراعة الأسنان</option>
+        <option value="ortho">تقويم الأسنان</option>
+      </select>
+    </div>
+    <div class="form-group"><label>ربط بخطة علاج (اختياري)</label>
+      <select class="form-control" id="csPlanId" onchange="csOnPlanChange()"><option value="">-- لا شيء --</option></select>
+    </div>
+    <div class="alert alert-info" style="font-size:11px;margin:8px 0">
+      💡 سيتم إنشاء PDF بمعلومات المريض وبنود الموافقة. اطبع الورقة، اطلب من المريض التوقيع، ثم صوّرها وارفعها هنا.
+    </div>
+    <div class="form-group"><label>معاينة بنود الموافقة</label>
+      <div id="csPreview" style="background:#f8fbfd;border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;line-height:1.8;max-height:200px;overflow-y:auto;white-space:pre-wrap"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-newConsent')">إلغاء</button>
+      <button class="btn btn-primary" onclick="csPrint()">📄 طباعة PDF</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- EDIT CONSENT TEMPLATES -->
+<div class="overlay" id="mo-editConsentTpl"><div class="modal modal-lg">
+  <div class="modal-header"><span class="modal-title">⚙️ تعديل قوالب الموافقات</span><button class="modal-close" onclick="closeModal('mo-editConsentTpl')">✕</button></div>
+  <div class="modal-body">
+    <div class="alert alert-info" style="font-size:11px">
+      💡 يمكنك استخدام المتغيرات: <code>{اسم_المريض}</code>، <code>{اسم_العيادة}</code>، <code>{التاريخ}</code>
+    </div>
+    <div class="form-group"><label>نوع القالب</label>
+      <select class="form-control" id="cstSel" onchange="csTplLoad()">
+        <option value="general">علاج عام</option>
+        <option value="cleaning">تنظيف الأسنان</option>
+        <option value="implant">زراعة الأسنان</option>
+        <option value="ortho">تقويم الأسنان</option>
+      </select>
+    </div>
+    <div class="form-group"><label>عنوان الموافقة</label>
+      <input class="form-control" id="cstTitle">
+    </div>
+    <div class="form-group"><label>نص الموافقة وبنود الالتزام</label>
+      <textarea class="form-control" id="cstBody" style="min-height:240px;font-size:12px;line-height:1.7"></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="csTplResetOne()">↺ إعادة الافتراضي</button>
+      <button class="btn btn-primary" onclick="csTplSave()">💾 حفظ</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- MARK CONSENT AS SIGNED (no image — physical signed copy filed externally) -->
+<div class="overlay" id="mo-uploadConsent"><div class="modal">
+  <div class="modal-header" style="background:#16a34a;color:#fff"><span class="modal-title">✅ تأكيد توقيع الموافقة</span><button class="modal-close" onclick="closeModal('mo-uploadConsent')" style="color:#fff">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="csUpId">
+    <div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:10px;padding:14px;margin-bottom:14px">
+      <div style="font-size:13px;font-weight:700;color:#166534;margin-bottom:8px">📋 الإجراء المطلوب:</div>
+      <ol style="margin:0;padding-right:20px;font-size:12px;color:#15803d;line-height:1.9">
+        <li>اطبع نسخة الموافقة (إن لم تكن مطبوعة)</li>
+        <li>اطلب من المريض التوقيع على الورقة</li>
+        <li>احفظ الورقة الموقّعة في ملف العيادة الورقي</li>
+        <li>اضغط "تأكيد التوقيع" أدناه لتسجيلها بالنظام</li>
+      </ol>
+    </div>
+    <div style="background:#fefce8;border:1px solid #fde047;border-radius:8px;padding:10px;margin-bottom:14px;font-size:11px;color:#854d0e">
+      💡 <strong>ملاحظة:</strong> النظام يسجّل التاريخ والشخص الذي أكّد التوقيع فقط — الموافقة الورقية الموقّعة هي المرجع القانوني وتُحفظ خارج النظام.
+    </div>
+    <div class="form-group">
+      <label>ملاحظات إضافية (اختياري)</label>
+      <input type="text" class="form-control" id="csUpNote" placeholder="مثال: ملف رقم 23، أو رف A...">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-uploadConsent')">إلغاء</button>
+      <button class="btn" id="csUpBtn" style="background:#16a34a;color:#fff" onclick="csUpSave()">✅ تأكيد التوقيع</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- ORTHO DEVICE MESSAGE PICKER -->
+<div class="overlay" id="mo-orthoDevPicker"><div class="modal modal-lg">
+  <div class="modal-header" style="background:#6c2fa0;color:#fff">
+    <span class="modal-title">📱 رسالة جهاز التقويم</span>
+    <button class="modal-close" onclick="closeModal('mo-orthoDevPicker')" style="color:#fff">✕</button>
+  </div>
+  <div class="modal-body">
+    <input type="hidden" id="odPickPlanId">
+    <div style="background:#fef3ff;border:1.5px solid #c084fc;border-radius:var(--r);padding:10px 12px;margin-bottom:12px;font-size:12px;color:#5a1f7f">
+      <div id="odPickInfo" style="font-weight:700"></div>
+      <div style="font-size:10px;color:#7d4099;margin-top:3px">اختر نوع الرسالة المناسبة لإرسالها عبر واتساب</div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+      <button class="btn btn-ghost btn-xs" id="odPickEditBtn" onclick="closeModal('mo-orthoDevPicker');openOrthoDevTplEditor()" style="display:none">⚙️ تعديل القوالب</button>
+    </div>
+    <div id="odPickList" style="display:grid;grid-template-columns:1fr;gap:8px"></div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-orthoDevPicker')">إغلاق</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- ORTHO DEVICE TEMPLATE EDITOR (manager only) -->
+<div class="overlay" id="mo-editOrthoDevTpl"><div class="modal modal-lg">
+  <div class="modal-header"><span class="modal-title">⚙️ تعديل قوالب رسائل أجهزة التقويم</span><button class="modal-close" onclick="closeModal('mo-editOrthoDevTpl')">✕</button></div>
+  <div class="modal-body">
+    <div class="alert alert-info" style="font-size:11px;margin-bottom:10px">
+      المتغيرات المتاحة: <code>{اسم_المريض}</code> • <code>{اسم_الطبيب}</code> • <code>{موعد_القادم}</code> • <code>{نوع_الجهاز}</code> • <code>{اسم_العيادة}</code>
+    </div>
+    <div class="form-group">
+      <label>نوع الجهاز</label>
+      <select class="form-control" id="odtSel" onchange="odTplLoad()">
+        <option value="fixed">🔧 جهاز ثابت (Fixed)</option>
+        <option value="wireChange">🪛 تغيير سلك (Wire Change)</option>
+        <option value="elastics">⚪ المطّاطات (Elastics)</option>
+        <option value="expander">↔️ الموسّعة (Expander)</option>
+        <option value="aligners">✨ Aligners (شفاف)</option>
+        <option value="removableRetainer">🦷 مثبّت متحرّك (Removable Retainer)</option>
+        <option value="fixedRetainer">🔗 مثبّت ثابت (Fixed Retainer)</option>
+        <option value="headgear">🎯 Headgear</option>
+      </select>
+    </div>
+    <div class="form-group"><label>عنوان القالب</label><input class="form-control" id="odtTitle"></div>
+    <div class="form-group"><label>نص الرسالة</label><textarea class="form-control" id="odtBody" style="min-height:280px;font-size:13px;line-height:1.7"></textarea></div>
+    <div class="form-actions" style="justify-content:space-between">
+      <button class="btn btn-ghost btn-sm" onclick="odTplResetOne()" style="color:var(--orange)">↺ إعادة للافتراضي</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost" onclick="closeModal('mo-editOrthoDevTpl')">إلغاء</button>
+        <button class="btn btn-primary" onclick="odTplSave()">💾 حفظ</button>
+      </div>
+    </div>
+  </div>
+</div></div>
+
+<!-- ADD STAFF -->
+<div class="overlay" id="mo-addStaff"><div class="modal">
+  <div class="modal-header"><span class="modal-title" id="staffModalTitle">➕ كادر جديد</span><button class="modal-close" onclick="closeModal('mo-addStaff')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="sEditId">
+    <div class="form-row">
+      <div class="form-group"><label>الاسم الكامل *</label><input class="form-control" id="sName"></div>
+      <div class="form-group"><label>الدور *</label>
+        <select class="form-control" id="sRole">
+          <option value="doctor">👨‍⚕️ طبيب أسنان</option>
+          <option value="doctor-manager">👨‍⚕️📊 طبيب مدير</option>
+          <option value="manager">📊 مدير العيادة</option>
+          <option value="reception">🖥️ استقبال</option>
+          <option value="marketer">📢 مسوّق</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>اسم المستخدم *</label><input class="form-control" id="sUsername" dir="ltr"></div>
+      <div class="form-group"><label>الهاتف</label><input class="form-control" id="sPhone" type="tel"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>نسبة العمولة %</label><input class="form-control" id="sComm" type="number" value="30"></div>
+      <div class="form-group"><label>كلمة المرور *</label><div class="flex gap-6"><input class="form-control" id="sPass"><button class="btn btn-ghost btn-icon" onclick="genPass()" title="توليد">🎲</button></div></div>
+    </div>
+    <div class="form-group"><label>مهام إضافية (اختياري)</label><input class="form-control" id="sSubRole" placeholder="مثال: تعقيم، صيانة..."></div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-addStaff')">إلغاء</button><button class="btn btn-primary" onclick="saveStaff()">💾 حفظ</button></div>
+  </div>
+</div></div>
+
+<!-- ADD INVENTORY ITEM -->
+<div class="overlay" id="mo-addItem"><div class="modal">
+  <div class="modal-header"><span class="modal-title">🛒 إضافة طلب شراء</span><button class="modal-close" onclick="closeModal('mo-addItem')">✕</button></div>
+  <div class="modal-body">
+    <div class="form-group"><label>اسم المادة المطلوبة *</label><input class="form-control" id="itemName" placeholder="قفازات، إبر..."></div>
+    <div class="form-row">
+      <div class="form-group"><label>الفئة</label>
+        <select class="form-control" id="itemCat"><option>مستهلكات</option><option>أدوات</option><option>مواد طبية</option><option>مواد مختبر</option><option>أخرى</option></select>
+      </div>
+      <div class="form-group"><label>الكمية / الوحدة</label><input class="form-control" id="itemUnit" placeholder="3 صناديق..."></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>الأولوية</label>
+        <select class="form-control" id="itemPriority"><option value="normal">عادي</option><option value="urgent">عاجل 🔴</option></select>
+      </div>
+      <div class="form-group"><label>ملاحظة</label><input class="form-control" id="itemNote"></div>
+    </div>
+    <div class="form-actions"><button class="btn btn-ghost" onclick="closeModal('mo-addItem')">إلغاء</button><button class="btn btn-primary" onclick="saveItem()">💾 إضافة للقائمة</button></div>
+  </div>
+</div></div>
+
+<!-- NEW TASK -->
+<div class="overlay" id="mo-newTask"><div class="modal">
+  <div class="modal-header"><span class="modal-title" id="newTaskTitle">➕ مهمة جديدة</span><button class="modal-close" onclick="closeModal('mo-newTask')">✕</button></div>
+  <div class="modal-body">
+    <input type="hidden" id="taskEditId" value="">
+    <div class="form-group"><label>عنوان المهمة *</label><input class="form-control" id="taskTitle" placeholder="مثال: تنظيف غرفة العمليات"></div>
+    <div class="form-group"><label>التفاصيل</label><textarea class="form-control" id="taskDesc" rows="3" placeholder="تفاصيل إضافية..."></textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label>تكليف *</label><select class="form-control" id="taskAssignee"></select></div>
+      <div class="form-group"><label>الأولوية</label>
+        <select class="form-control" id="taskPriority">
+          <option value="low">🟢 منخفضة</option>
+          <option value="medium" selected>🟡 متوسطة</option>
+          <option value="high">🟠 عالية</option>
+          <option value="urgent">🔴 عاجلة</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label>تاريخ الاستحقاق</label><input type="date" class="form-control" id="taskDueDate"></div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-newTask')">إلغاء</button>
+      <button class="btn btn-primary" onclick="saveTask()">💾 حفظ</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- ══════════════════════════════════════════════════════
+     JAVASCRIPT
+══════════════════════════════════════════════════════ -->
+<script src="app.js"></script>
+<!-- UNIFIED APPOINTMENT HUB MODAL -->
+<div class="overlay" id="mo-apptHub"><div class="modal modal-lg" style="max-width:680px">
+  <div class="modal-header" style="background:linear-gradient(135deg,#0d5c7a,#083d55);color:#fff">
+    <span class="modal-title" style="display:flex;align-items:center;gap:10px;flex:1">
+      <span>🎯 إدارة الموعد</span>
+      <span id="hubHeader" style="margin-right:auto;flex:1"></span>
+    </span>
+    <button class="modal-close" onclick="closeApptHub()" style="color:#fff">✕</button>
+  </div>
+  <div class="modal-body" style="padding:0">
+    <div style="display:flex;border-bottom:2px solid #e2e8f0;background:#f8fafc;overflow-x:auto">
+      <button id="hubTab-newplan"  class="hub-tab" onclick="hubSwitchTab('newplan')"  style="padding:12px 16px;border:none;background:transparent;font-weight:700;cursor:pointer;font-size:13px;white-space:nowrap;font-family:inherit">+ خطة جديدة</button>
+      <button id="hubTab-continue" class="hub-tab" onclick="hubSwitchTab('continue')" style="padding:12px 16px;border:none;background:transparent;font-weight:700;cursor:pointer;font-size:13px;white-space:nowrap;font-family:inherit">📋 خطط نشطة</button>
+      <button id="hubTab-session"  class="hub-tab" onclick="hubSwitchTab('session')"  style="padding:12px 16px;border:none;background:transparent;font-weight:700;cursor:pointer;font-size:13px;white-space:nowrap;font-family:inherit">📝 الجلسة</button>
+      <button id="hubTab-rx"       class="hub-tab" onclick="hubSwitchTab('rx')"       style="padding:12px 16px;border:none;background:transparent;font-weight:700;cursor:pointer;font-size:13px;white-space:nowrap;font-family:inherit">💊 وصفة</button>
+      <button id="hubTab-done"     class="hub-tab" onclick="hubSwitchTab('done')"     style="padding:12px 16px;border:none;background:transparent;font-weight:700;cursor:pointer;font-size:13px;white-space:nowrap;font-family:inherit">✅ إنهاء</button>
+    </div>
+    <div style="padding:16px;max-height:60vh;overflow-y:auto">
+      <div id="hubPanel-newplan"  style="display:none"></div>
+      <div id="hubPanel-continue" style="display:none"></div>
+      <div id="hubPanel-session"  style="display:none"></div>
+      <div id="hubPanel-rx"       style="display:none"></div>
+      <div id="hubPanel-done"     style="display:none"></div>
+    </div>
+  </div>
+</div></div>
+
+<!-- EDIT-WITH-REASON MODAL -->
+<div class="overlay" id="mo-editReason"><div class="modal" style="max-width:420px">
+  <div class="modal-header" style="background:#fef3c7;color:#854d0e">
+    <span class="modal-title" id="erTitle">تعديل القيمة</span>
+    <button class="modal-close" onclick="closeModal('mo-editReason')">✕</button>
+  </div>
+  <div class="modal-body">
+    <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:8px 10px;margin-bottom:12px;font-size:12px;color:#854d0e">
+      ⚠️ كل تعديل يُسجَّل في سجل التدقيق مع المستخدم والوقت والسبب.
+    </div>
+    <div class="form-group">
+      <label>القيمة الحالية</label>
+      <div id="erOldDisplay" style="padding:8px 12px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;color:#991b1b;font-weight:700;font-size:14px"></div>
+    </div>
+    <div class="form-group">
+      <label id="erLabel">القيمة الجديدة</label>
+      <input id="erValue" type="text" class="form-control">
+    </div>
+    <div class="form-group">
+      <label>سبب التعديل <span style="color:red">*</span></label>
+      <textarea id="erReason" rows="2" class="form-control" placeholder="مثال: خطأ في إدخال المبلغ — كان 50000 لا 30000"></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-editReason')">إلغاء</button>
+      <button class="btn btn-success" onclick="confirmEditReason()">💾 تأكيد التعديل</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- ADD EXPENSE MODAL -->
+<div class="overlay" id="mo-addExpense"><div class="modal" style="max-width:460px">
+  <div class="modal-header" style="background:#fef2f2;color:#991b1b">
+    <span class="modal-title">💸 إضافة صرفية</span>
+    <button class="modal-close" onclick="closeModal('mo-addExpense')">✕</button>
+  </div>
+  <div class="modal-body">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="form-group">
+        <label>المبلغ (د.ع) <span style="color:red">*</span></label>
+        <input type="number" id="expAmount" class="form-control" placeholder="0">
+      </div>
+      <div class="form-group">
+        <label>التاريخ</label>
+        <input type="date" id="expDate" class="form-control">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>الفئة</label>
+      <select id="expCat" class="form-control"></select>
+    </div>
+    <div class="form-group">
+      <label>الوصف <span style="color:red">*</span></label>
+      <input type="text" id="expDesc" class="form-control" placeholder="مثال: إيجار شهر تموز">
+    </div>
+    <div class="form-group">
+      <label>طريقة الدفع</label>
+      <select id="expMethod" class="form-control">
+        <option value="نقد">نقد</option>
+        <option value="تحويل بنكي">تحويل بنكي</option>
+        <option value="شيك">شيك</option>
+        <option value="أخرى">أخرى</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>ملاحظات</label>
+      <textarea id="expNotes" rows="2" class="form-control"></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-addExpense')">إلغاء</button>
+      <button class="btn btn-success" onclick="saveExpense()">💾 حفظ</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- RECEIVE PURCHASE MODAL -->
+<div class="overlay" id="mo-receivePurchase"><div class="modal" style="max-width:460px">
+  <div class="modal-header" style="background:#dbeafe;color:#1e40af">
+    <span class="modal-title">📦 استلام الطلب</span>
+    <button class="modal-close" onclick="closeModal('mo-receivePurchase')">✕</button>
+  </div>
+  <div class="modal-body">
+    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px;margin-bottom:12px">
+      <div style="font-size:12px;color:#0369a1">المادة:</div>
+      <div id="rpItemName" style="font-weight:800;font-size:15px;color:#0c4a6e"></div>
+    </div>
+    <input type="hidden" id="rpModeInput" value="cash">
+    <div class="form-group">
+      <label>طريقة الدفع <span style="color:red">*</span></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button type="button" id="rpModeCash" class="btn" onclick="rpSetMode('cash')" style="padding:14px;border:2px solid #16a34a;background:#16a34a;color:#fff;font-weight:700">💵 نقد الآن<br><span style="font-size:10px;font-weight:400;opacity:.85">→ صرفية تلقائية</span></button>
+        <button type="button" id="rpModeCredit" class="btn" onclick="rpSetMode('credit')" style="padding:14px;border:2px solid #f59e0b;background:#fff;color:#92400e;font-weight:700">📝 آجل (دين)<br><span style="font-size:10px;font-weight:400;opacity:.85">→ دين تلقائي</span></button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="form-group">
+        <label>المبلغ (د.ع) <span style="color:red">*</span></label>
+        <input type="number" id="rpAmount" class="form-control">
+      </div>
+      <div class="form-group">
+        <label>التاريخ</label>
+        <input type="date" id="rpDate" class="form-control">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>الجهة (المختبر / المورد)</label>
+      <select id="rpVendor" class="form-control"></select>
+    </div>
+    <div class="form-group">
+      <label>فئة الصرفية</label>
+      <select id="rpExpCat" class="form-control"></select>
+    </div>
+    <div class="form-group" id="rpDueRow" style="display:none">
+      <label>تاريخ استحقاق الدين</label>
+      <input type="date" id="rpDue" class="form-control">
+    </div>
+    <div class="form-group">
+      <label>ملاحظات</label>
+      <textarea id="rpNotes" rows="2" class="form-control"></textarea>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-receivePurchase')">إلغاء</button>
+      <button class="btn btn-success" onclick="confirmReceivePurchase()">✅ تأكيد الاستلام</button>
+    </div>
+  </div>
+</div></div>
+
+<!-- ADS EDITOR MODAL -->
+<div class="overlay" id="mo-adsEdit"><div class="modal" style="max-width:520px">
+  <div class="modal-header" style="background:#fef3c7;color:#854d0e">
+    <span class="modal-title">✏️ تحرير الإعلان</span>
+    <button class="modal-close" onclick="closeModal('mo-adsEdit')">✕</button>
+  </div>
+  <div class="modal-body">
+    <input type="hidden" id="adsEditKey">
+    <div style="display:grid;grid-template-columns:80px 1fr;gap:10px">
+      <div class="form-group">
+        <label>الأيقونة</label>
+        <input type="text" id="adsEditIcon" class="form-control" maxlength="2" style="text-align:center;font-size:24px;padding:6px">
+      </div>
+      <div class="form-group">
+        <label>العنوان الرئيسي <span style="color:red">*</span></label>
+        <input type="text" id="adsEditTitle" class="form-control" placeholder="مثال: استبدل أسنانك المفقودة">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>العنوان الفرعي</label>
+      <input type="text" id="adsEditSubtitle" class="form-control" placeholder="مثال: زراعة بأحدث التقنيات">
+    </div>
+    <div class="form-group">
+      <label>الوصف</label>
+      <textarea id="adsEditBody" rows="3" class="form-control" placeholder="نص شرح الخدمة أو العرض..."></textarea>
+    </div>
+    <div class="form-group">
+      <label>نص زر الحجز</label>
+      <input type="text" id="adsEditCta" class="form-control" placeholder="📅 احجز موعداً">
+    </div>
+    <div class="form-group">
+      <label>التدرّج اللوني (CSS background)</label>
+      <input type="text" id="adsEditBg" class="form-control" placeholder="linear-gradient(135deg,#0d5c7a 0%,#083d55 100%)">
+      <div style="font-size:10px;color:#64748b;margin-top:4px">يمكن استخدام لون واحد مثل <code>#0d5c7a</code> أو تدرّج كامل</div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('mo-adsEdit')">إلغاء</button>
+      <button class="btn btn-success" onclick="adsEditSave()">💾 حفظ</button>
+    </div>
+  </div>
+</div></div>
+
+</body>
+</html>
